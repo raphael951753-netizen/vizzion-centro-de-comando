@@ -1,0 +1,7 @@
+id;titulo;preco;preco_antigo;link;imagem;categoria;loja;vendas;nota
+MLB1;Cadeira Gamer Ergonômica Preta;899,90;1299,00;https://exemplo.com/cadeira;;cadeira escritório gamer;Mercado Livre;1200;4.7
+MLB2;Mesa de Escritório 120cm;349,90;499,00;https://exemplo.com/mesa;;mesa escritório;Mercado Livre;800;4.5
+SHP1;Fone Bluetooth com Cancelamento de Ruído;129,90;219,00;https://exemplo.com/fone;;fone áudio;Shopee;5400;4.6
+SHP2;Luminária LED de Mesa Articulada;59,90;99,90;https://exemplo.com/luminaria;;iluminação quarto escritório;Shopee;2100;4.8
+MLB3;Cama Box Solteiro com Colchão;699,00;999,00;https://exemplo.com/cama;;cama quarto solteiro;Mercado Livre;300;4.4
+MLB4;Guarda-roupa 6 Portas;849,00;1190,00;https://exemplo.com/guardaroupa;;guarda-roupa quarto;Mercado Livre;210;4.3

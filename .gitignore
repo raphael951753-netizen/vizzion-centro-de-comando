@@ -1,0 +1,36 @@
+﻿# Segredos e variáveis de ambiente
+.env
+.env.*
+!.env.example
+!.env.template
+*.pem
+*.key
+secrets/
+credentials/
+
+# Dependências e arquivos gerados
+node_modules/
+dist/
+build/
+coverage/
+*.log
+npm-debug.log*
+
+# Sistema e editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Arquivos locais de configuração
+.supabase/
+
+# Proteção adicional de credenciais e arquivos locais
+.env*
+!.env.example
+!.env.template
+.DS_Store
+Thumbs.db
+*.local
+
+git

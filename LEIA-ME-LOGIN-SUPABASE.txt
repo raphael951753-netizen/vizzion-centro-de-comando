@@ -1,0 +1,22 @@
+VIZZION — LOGIN INDIVIDUAL E CADASTRO DE EQUIPE PELO PAINEL
+
+O QUE ESTA VERSÃO FAZ
+- Cada pessoa entra com seu próprio e-mail e senha pelo Supabase Auth.
+- Não há limite fixo de três contas nem lista de e-mails no servidor.
+- Na aba Equipe, qualquer integrante autenticado pode cadastrar uma nova conta informando nome, e-mail e senha inicial.
+- Todos têm permissões equivalentes para trabalhar nos dados compartilhados.
+- O histórico identifica o usuário autenticado que realizou ações suportadas.
+
+ANTES DE USAR
+1. No SQL Editor do Supabase, execute backend-exemplo/migracao-historico.sql se ainda não executou.
+2. Crie apenas a primeira conta em Supabase > Authentication > Users.
+3. Hospede backend-exemplo num serviço Node.js 18+ e configure SUPABASE_URL, SUPABASE_ANON_KEY e SUPABASE_SERVICE_ROLE_KEY como variáveis secretas do serviço.
+4. O comando de inicialização é: npm start
+5. Na extensão, cole a URL HTTPS da API, clique em Permitir conexão e entre com a primeira conta.
+6. Abra Equipe para cadastrar as outras pessoas. A senha inicial deve ser entregue por um canal privado e ser exclusiva.
+
+SEGURANÇA
+- NUNCA coloque SUPABASE_SERVICE_ROLE_KEY na extensão ou no GitHub.
+- Não envie chaves secretas ou senhas neste chat.
+- A chave SUPABASE_ANON_KEY é pública; a service_role é secreta.
+- Todos os usuários autenticados podem cadastrar novos integrantes, como combinado para a equipe pequena. Se um integrante não for mais confiável, remova sua conta em Supabase > Authentication > Users.

@@ -1,0 +1,4 @@
+# A função lida com login sem token e valida manualmente o token nas rotas privadas.
+# Por isso o gateway JWT precisa ficar desativado para essa função específica.
+[functions.vizzion-api]
+verify_jwt = false

@@ -1,0 +1,85 @@
+{
+  "manifest_version": 3,
+  "name": "Centro de Comando — Afiliados",
+  "version": "1.7.6",
+  "description": "Painel Vizzion: vitrine com filtros, exclusão de produtos, mensagens IA, limpeza do catálogo e quantidade exata de produtos por solicitação no atendimento.",
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "action": {
+    "default_title": "Abrir Centro de Comando"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://web.whatsapp.com/*",
+    "https://web.telegram.org/*",
+    "https://www.instagram.com/*",
+    "https://www.facebook.com/*",
+    "https://www.tiktok.com/*",
+    "https://studio.youtube.com/*",
+    "https://api.anthropic.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://*.mlstatic.com/*",
+    "https://*.susercontent.com/*",
+    "https://*.shopee.com.br/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://web.whatsapp.com/*"
+      ],
+      "js": [
+        "wa-visibility.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://web.whatsapp.com/*"
+      ],
+      "js": [
+        "common.js",
+        "whatsapp.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://web.telegram.org/*"
+      ],
+      "js": [
+        "common.js",
+        "telegram.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.instagram.com/*",
+        "https://www.facebook.com/*",
+        "https://www.tiktok.com/*",
+        "https://studio.youtube.com/*"
+      ],
+      "js": [
+        "common.js",
+        "social.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
