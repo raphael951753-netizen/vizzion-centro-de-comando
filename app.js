@@ -880,7 +880,8 @@ function viewChat() {
       <h3>Canais</h3>
       ${S.chat.channels.map((c) => {
         const active = c.id === (routeChat || 'geral');
-        return `<a class="chat-channel ${active ? 'on' : ''}" data-act="chatChannel" data-cid="${esc(c.id)}"><span class="dot"></span><span class="name">${esc(c.name)}</span>${c.type === 'ia' ? '<span class="ia-tag">IA</span>' : ''}</a>`;
+        const canDelete = c.id !== 'geral';
+        return `<div class="chat-channel-row"><a class="chat-channel ${active ? 'on' : ''}" data-act="chatChannel" data-cid="${esc(c.id)}"><span class="dot"></span><span class="name">${esc(c.name)}</span>${c.type === 'ia' ? '<span class="ia-tag">IA</span>' : ''}</a>${canDelete ? `<button class="chat-del" data-act="chatDelChannel" data-cid="${esc(c.id)}" title="Excluir canal">✕</button>` : ''}</div>`;
       }).join('')}
       <div class="chat-new" data-act="chatNewChannel">+ Novo canal</div>
     </div>
@@ -911,7 +912,7 @@ function render() {
   if (!AUTH || !me) { root.innerHTML = viewLogin(); return; }
   const views = { hoje: viewHoje, agencia: viewAgencia, usuarios: viewUsuarios, historico: viewHistorico, biblioteca: viewBiblioteca, ferramentas: viewFerramentas, publicar: viewPublicar, atendimento: viewAtendimento, ofertas: viewOfertas, catalogo: viewCatalogo, config: viewConfig, chat: viewChat };
   
-  if (route === 'chat') routeChat = 'geral';
+  if (route === 'chat' && !S.chat.channels.find((c) => c.id === routeChat)) routeChat = S.chat.channels[0]?.id || 'geral';
   const v = route.startsWith('proj:') ? viewProjeto(route.slice(5)) : route.startsWith('ferramentas:') ? viewFerramentas() : route.startsWith('catalogo:') ? viewCatalogo() : (views[route] || viewHoje)();
   root.innerHTML = sidebar() + `<main>${v}</main>`;
   decorateVitrineMarketplaceButtons();
@@ -1010,6 +1011,14 @@ const actions = {
     } catch (error) { toast(`Falha ao enviar contexto: ${error.message || error}`); }
   },
   chatChannel(el) { routeChat = el.dataset.cid; render(); },
+  async chatDelChannel(el) {
+    const cid = el.dataset.cid; if (!cid || cid === 'geral') return;
+    if (!confirm('Excluir este canal? As mensagens serão perdidas.')) return;
+    S.chat.channels = S.chat.channels.filter((c) => c.id !== cid);
+    S.chat.messages = S.chat.messages.filter((m) => m.channelId !== cid);
+    if (routeChat === cid) routeChat = S.chat.channels[0]?.id || 'geral';
+    save(); render(); toast('Canal excluído.');
+  },
   async chatNewChannel() {
     const name = prompt('Nome do novo canal:', 'Canal'); if (!name || !name.trim()) return;
     S.chat.channels.push({ id: 'ch-' + uid(), name: name.trim() });
