@@ -16,6 +16,8 @@ const CATALOG_FILE = process.env.VIZZION_CATALOG_FILE ? path.resolve(process.env
 
 const VIZZION_API_URL = String(process.env.VIZZION_API_URL || '').trim();
 const VIZZION_ANON_KEY = String(process.env.VIZZION_ANON_KEY || '').trim();
+const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
+const GEMINI_MODEL = String(process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite').trim();
 
 async function supabaseRequest(path, { method = 'GET', body, token } = {}) {
   if (!VIZZION_API_URL) throw new Error('VIZZION_API_URL nao configurado.');
@@ -181,16 +183,47 @@ function createServer() {
 
   server.registerTool('responder_mensagem', {
     title: 'Responder mensagem da IA',
-    description: 'Recebe uma mensagem do usuario no chat da Vizzion e retorna a resposta da IA.',
+    description: 'Recebe uma mensagem do usuario no chat da Vizzion e retorna a resposta gerada pela IA (Gemini).',
     inputSchema: {
       mensagem: z.string().min(1).max(20000).describe('Texto do usuario no chat.'),
       canal: z.string().optional().describe('ID do canal onde a mensagem foi enviada.')
     }
   }, async ({ mensagem, canal }) => {
-    // Resposta base da IA - pode ser expandida com Gemini/OpenAI depois
-    const resposta = `Recebi sua mensagem no canal ${canal || 'geral'}: "${mensagem}".\n\nEsta e uma resposta de teste do servidor MCP. Para conectar uma IA real (Gemini/OpenAI), e so adicionar a logica aqui nesta tool responder_mensagem.`;
+    if (!GEMINI_API_KEY) {
+      return { content: [{ type: 'text', text: 'IA nao configurada: defina a variavel de ambiente GEMINI_API_KEY no servidor MCP e reinicie.' }] };
+    }
 
-    return { content: [{ type: 'text', text: resposta }] };
+    const systemInstruction = `Voce é a assistente de IA do painel Vizzion Centro de Comando. Responda em portugues do Brasil, de forma objetiva e curta. O usuario enviou esta mensagem no canal ${canal || 'geral'} do chat interno da equipe.`;
+
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemInstruction }] },
+          contents: [{ role: 'user', parts: [{ text: mensagem }] }],
+          generationConfig: { maxOutputTokens: 800, temperature: 0.7 }
+        })
+      });
+
+      const result = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        const status = Number(response.status);
+        const errorCode = String(result?.error?.status || '').slice(0, 80);
+        return { content: [{ type: 'text', text: `Erro da Gemini (HTTP ${status}): ${errorCode || 'falha na requisicao.'}` }] };
+      }
+
+      const text = (result?.candidates?.[0]?.content?.parts || []).map((part: any) => part?.text || '').join('').trim();
+
+      if (!text) {
+        return { content: [{ type: 'text', text: 'A Gemini nao retornou conteúdo.' }] };
+      }
+
+      return { content: [{ type: 'text', text }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Erro ao contatar a Gemini: ${error instanceof Error ? error.message : String(error)}` }] };
+    }
   });
 
   server.registerTool('buscar_produtos', {
