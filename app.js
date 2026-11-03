@@ -217,7 +217,7 @@ async function sendPhotos(net, expectedChat, files, caption = '') {
 const DEFAULT_BACKEND_URL = 'https://ttytmrjqjkdqeksyoxts.supabase.co/functions/v1/vizzion-api';
 const DEFAULT = () => ({
   users: [],
-  settings: { backendUrl: DEFAULT_BACKEND_URL, backendToken: '', mcpUrl: 'http://127.0.0.1:8787', mcpToken: '', stagesPerDay: 2, autoMaxPerHour: 20, botPhotosMax: 3, photoTabSwitch: true },
+  settings: { backendUrl: DEFAULT_BACKEND_URL, backendToken: '', mcpUrl: 'http://127.0.0.1:8787', mcpToken: '', geminiKey: '', geminiModel: 'gemini-3.5-flash-lite', stagesPerDay: 2, autoMaxPerHour: 20, botPhotosMax: 3, photoTabSwitch: true },
   offerSendQueue: [],
   general: { stages: [], note: '', messages: [] },
   chat: { channels: [{ id: 'geral', name: 'Geral' }, { id: 'ia', name: 'IA · Migoo', type: 'ia' }], messages: [] },
@@ -866,6 +866,7 @@ function viewConfig() {
   <section><h3>Bot e tasks</h3>${f('autoMaxPerHour', 'Limite de respostas automáticas por hora', 'number')}${f('botPhotosMax', 'Fotos de produtos por resposta automática (0 = não enviar)', 'number')}${f('stagesPerDay', 'Etapas por projeto nas tasks do dia', 'number')}</section>
   <section><h3>Catálogo no banco de dados</h3><p class="muted">Apaga todos os produtos da tabela compartilhada no backend e limpa o catálogo deste navegador. Use quando quiser começar do zero após importar planilhas antigas. Essa ação não pode ser desfeita; exporte um backup antes.</p><button class="btn danger" data-act="clearAllCatalogDatabase">Excluir todos os catálogos do banco de dados</button></section>
   <section><h3>Conector MCP</h3><p class="muted">Conecte um servidor MCP local ou remoto para compartilhar contexto e ferramentas com uma IA compatível. O token fica somente neste navegador.</p><div class="grid2">${f('mcpUrl', 'URL do servidor MCP', 'url', 'http://127.0.0.1:8787')}<label class="row"><span style="width:240px">Token MCP</span><input class="grow" data-path="s|mcpToken" type="password" value="${esc(S.settings.mcpToken || '')}" placeholder="Bearer token do servidor"></label></div><textarea id="mcp-context-text" placeholder="Texto de teste para enviar ao MCP" style="min-height:90px"></textarea><div class="row"><button class="btn ghost" data-act="grantMcp">Autorizar conexão</button><button class="btn ghost" data-act="testMcp">Testar conexão</button><button class="btn" data-act="sendMcpContext">Enviar contexto</button></div></section>
+  <section><h3>IA Gemini (chat do painel)</h3><p class="muted">Configure a chave da Google AI Studio para a IA responder no canal IA · Migoo do Chat. Fica salva somente neste navegador.</p>${f('geminiKey', 'Chave Gemini', 'password', 'AIza...')}${f('geminiModel', 'Modelo', 'text', 'gemini-3.5-flash-lite')}<div class="row"><button class="btn ghost" data-act="testGeminiKey">Testar chave Gemini</button></div></section>
   <section><h3>Equipe e sincronização</h3><p class="muted">Conexão com o backend Vizzion configurada automaticamente.</p><div class="row"><button class="btn ghost" data-act="pull">Baixar da equipe</button><button class="btn ghost" data-act="push">Enviar para a equipe</button><button class="btn ghost" data-act="logout">Sair da conta</button></div></section>
   <section><h3>Backup</h3><div class="row"><button class="btn ghost" data-act="export">Exportar dados (JSON)</button><input type="file" data-act="import" accept=".json"></div></section>`;
 }
@@ -953,6 +954,28 @@ async function mcpCallTool(name, argumentsValue) {
   return result.data.result || result.data;
 }
 
+async function askGeminiDirect(text, model, apiKey) {
+  const systemInstruction = 'Voce é a assistente de IA do painel Vizzion Centro de Comando. Responda em portugues do Brasil, de forma objetiva e curta.';
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: systemInstruction }] },
+      contents: [{ role: 'user', parts: [{ text }] }],
+      generationConfig: { maxOutputTokens: 800, temperature: 0.7 }
+    })
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const status = Number(response.status);
+    const errorCode = String(result?.error?.status || '').slice(0, 80);
+    throw new Error(`Gemini (HTTP ${status}): ${errorCode || 'falha na requisicao.'}`);
+  }
+  const out = (result?.candidates?.[0]?.content?.parts || []).map((part) => part?.text || '').join('').trim();
+  if (!out) throw new Error('A Gemini nao retornou conteúdo.');
+  return out;
+}
+
 const actions = {
   async setup() { return toast('Use a aba Equipe para cadastrar novos integrantes.'); },
   async refreshTeam() { await refreshTeam(); render(); toast('Lista da equipe atualizada.'); },
@@ -1010,6 +1033,19 @@ const actions = {
       toast(message);
     } catch (error) { toast(`Falha ao enviar contexto: ${error.message || error}`); }
   },
+  async testGeminiKey() {
+    const key = String(S.settings.geminiKey || '').trim();
+    if (!key) return toast('Informe a chave Gemini.');
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
+        body: JSON.stringify({ contents: [{ parts: [{ text: 'Responda apenas com OK.' }] }], generationConfig: { maxOutputTokens: 8, temperature: 0 } })
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      toast('Chave Gemini válida.');
+    } catch (e) { toast(`Chave Gemini inválida: ${e.message || e}`); }
+  },
   chatChannel(el) { routeChat = el.dataset.cid; render(); },
   async chatDelChannel(el) {
     const cid = el.dataset.cid; if (!cid || cid === 'geral') return;
@@ -1044,8 +1080,18 @@ const actions = {
     input.value = ''; save(); render();
     const el = $('#chat-msgs'); if (el) el.scrollTop = el.scrollHeight;
     try {
-      const result = await mcpCallTool('responder_mensagem', { mensagem: text, canal: channelId });
-      const resposta = result.content?.find(item => item.type === 'text')?.text || 'A IA não retornou uma resposta.';
+      let resposta;
+      const mcpUrl = String(S.settings.mcpUrl || '').trim();
+      const geminiKey = String(S.settings.geminiKey || '').trim();
+      const geminiModel = String(S.settings.geminiModel || 'gemini-3.5-flash-lite').trim();
+      if (mcpUrl) {
+        const result = await mcpCallTool('responder_mensagem', { mensagem: text, canal: channelId });
+        resposta = result.content?.find(item => item.type === 'text')?.text || 'A IA não retornou uma resposta.';
+      } else if (geminiKey) {
+        resposta = await askGeminiDirect(text, geminiModel, geminiKey);
+      } else {
+        throw new Error('Configure a URL do MCP ou a chave Gemini em Configurações.');
+      }
       const idx = S.chat.messages.findIndex(m => m.ai && m.typing && m.channelId === channelId);
       if (idx >= 0) { S.chat.messages[idx].text = resposta; delete S.chat.messages[idx].typing; }
       else { S.chat.messages.push({ id: 'msg-' + uid(), channelId, authorId: 'ia', authorName: 'IA · Migoo', text: resposta, createdAt: new Date().toISOString(), ai: true }); }
