@@ -119,6 +119,386 @@
     return 'Post preparado. Revise e clique em Publicar.';
   }
 
+  const marketplaceVisible = (el) => {
+    if (!el || !el.isConnected) return false;
+    const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+  };
+  const marketplaceStepDelay = async (ms = 850) => {
+    await CC.sleep(ms);
+    await CC.sleep(150);
+  };
+  const isMarketplaceCreatePage = () => location.hostname === 'www.facebook.com' && /^\/marketplace\/create\/item\/?$/.test(location.pathname);
+  const ensureMarketplaceCreatePage = () => {
+    if (!isMarketplaceCreatePage()) throw new Error(`Facebook Marketplace: rota inesperada (${location.pathname}).`);
+  };
+  const marketplaceText = (el) => String(el?.innerText || el?.textContent || el?.getAttribute('aria-label') || el?.placeholder || '').trim();
+  const isMarketplaceEditPage = () => location.hostname === 'www.facebook.com' && /^\/marketplace\/edit\/?$/.test(location.pathname);
+  const marketplaceFormRoot = () => {
+    const heading = [...document.querySelectorAll('h1,h2,h3,[role="heading"],div,span')]
+      .find((item) => marketplaceVisible(item) && /^item para venda$/i.test(marketplaceText(item).replace(/\s+/g, ' ').trim()) && item.getBoundingClientRect().left < 360);
+    if (!heading) return null;
+    let root = heading;
+    while (root.parentElement && root.parentElement !== document.body) {
+      const parent = root.parentElement;
+      const rect = parent.getBoundingClientRect();
+      if (rect.left >= 0 && rect.left < 360 && rect.width >= 180 && rect.width <= 500 && rect.height >= 400) root = parent;
+      else if (rect.width > 500 || rect.left >= 360) break;
+      else root = parent;
+    }
+    return root;
+  };
+  const marketplaceClick = (re) => {
+    const candidates = [...document.querySelectorAll('[role="option"],[role="menuitem"],[role="listbox"] [role="button"],button,[role="button"],a,label,span')]
+      .filter((x) => marketplaceVisible(x) && re.test(marketplaceText(x)));
+    const el = candidates.sort((a, b) => {
+      const exactA = re.test(marketplaceText(a)) && marketplaceText(a).trim().length < 80 ? 1 : 0;
+      const exactB = re.test(marketplaceText(b)) && marketplaceText(b).trim().length < 80 ? 1 : 0;
+      return exactB - exactA || marketplaceText(a).length - marketplaceText(b).length;
+    })[0];
+    if (!el) return false;
+    const target = el.matches('[role="option"],[role="menuitem"]') ? el : (el.closest('[role="option"],[role="menuitem"]') || el);
+    target.scrollIntoView({block: 'center'});
+    target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+    target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+    target.click();
+    return true;
+  };
+  const marketplaceClickWait = async (re, timeout = 5000) => {
+    const found = await CC.waitFor(() => marketplaceClick(re), timeout, 150);
+    if (found) await marketplaceStepDelay();
+    return !!found;
+  };
+  const marketplaceFormClickWait = async (re, timeout = 5000) => {
+    const found = await CC.waitFor(() => {
+      const formRoot = marketplaceFormRoot();
+      if (!formRoot) return null;
+      const candidates = [...formRoot.querySelectorAll('button,[role="button"],[role="combobox"]')]
+        .filter((el) => marketplaceVisible(el) && re.test(marketplaceText(el).replace(/\s+/g, ' ').trim()))
+        .filter((el) => !el.matches('a,[role="link"]') && !el.closest('a,[role="link"]'))
+        .sort((a, b) => marketplaceText(a).length - marketplaceText(b).length);
+      const element = candidates[0];
+      if (!element) return null;
+      element.scrollIntoView({ block: 'center' });
+      CC.clickDeep(element);
+      return element;
+    }, timeout, 150);
+    if (found) await marketplaceStepDelay();
+    return !!found;
+  };
+  const marketplacePublishWait = async (timeout = 8000) => {
+    const found = await CC.waitFor(() => {
+      const candidates = [...document.querySelectorAll('button,[role="button"],[role="none"],span')]
+        .filter((el) => marketplaceVisible(el) && /^(publicar|publish)$/i.test(marketplaceText(el).replace(/\s+/g, ' ').trim()))
+        .sort((a, b) => marketplaceText(a).length - marketplaceText(b).length);
+      const element = candidates[0];
+      if (!element) return null;
+      const target = element.closest('[role="none"],button,[role="button"]') || element;
+      target.scrollIntoView({ block: 'center' });
+      CC.clickDeep(target);
+      return target;
+    }, timeout, 150);
+    if (found) await marketplaceStepDelay(500);
+    return !!found;
+  };
+  const marketplaceClickExactTextWait = async (re, timeout = 5000) => {
+    const found = await CC.waitFor(() => {
+      if (!isMarketplaceCreatePage()) return null;
+      const formRoot = marketplaceFormRoot();
+      if (!formRoot) return null;
+      const textNodes = [];
+      const walker = document.createTreeWalker(formRoot, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (/mais detalhes|more details/i.test(String(node.nodeValue || '').replace(/\s+/g, ' ').trim())) {
+          textNodes.push(node);
+        }
+      }
+      let element = null;
+      for (const textNode of textNodes) {
+        let current = textNode.parentElement;
+        for (let depth = 0; current && current !== formRoot && depth < 8; depth++, current = current.parentElement) {
+          if (!marketplaceVisible(current)) continue;
+          const text = marketplaceText(current).replace(/\s+/g, ' ').trim();
+          const rect = current.getBoundingClientRect();
+          const inForm = rect.left >= 0 && rect.left < 360 && rect.top > 120 &&
+            rect.width >= 140 && rect.width <= 380 && rect.height >= 30 && rect.height <= 180;
+          const safe = !current.matches('a[href],[role="link"]') && !current.closest('a[href],[role="link"]');
+          const cardText = /mais detalhes\s+atraia mais interesse incluindo mais detalhes|more details/i.test(text);
+          if (inForm && safe && cardText) {
+            element = current;
+            break;
+          }
+        }
+        if (element) break;
+      }
+      if (!element) {
+        const labels = [...formRoot.querySelectorAll('div,span,p,h1,h2,h3,[role="heading"]')]
+          .filter((item) => marketplaceVisible(item) && /^(mais detalhes|more details)$/i.test(marketplaceText(item).replace(/\s+/g, ' ').trim()));
+        element = labels[0] || null;
+      }
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      if (rect.left >= 360 || rect.top <= 120 || rect.width <= 0 || rect.height <= 0) return null;
+      const safe = !element.matches('a[href],[role="link"]') && !element.closest('a[href],[role="link"]');
+      if (!safe) return null;
+      element.scrollIntoView({block: 'center'});
+      CC.clickDeep(element);
+      return element;
+    }, timeout, 150);
+    if (found) {
+      await CC.sleep(600);
+      if (!isMarketplaceCreatePage()) throw new Error(`Facebook Marketplace: o clique saiu da tela de criação (${location.pathname}).`);
+    }
+    return !!found;
+  };
+  const marketplaceField = (re) => [...document.querySelectorAll('input,textarea,[contenteditable="true"],[role="combobox"]')]
+    .find((el) => marketplaceVisible(el) && re.test(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('placeholder') || ''} ${el.getAttribute('name') || ''} ${el.parentElement?.innerText || ''}`));
+  const marketplaceDescriptionField = () => {
+    const fields = [...document.querySelectorAll('textarea,[contenteditable="true"]')]
+      .filter(marketplaceVisible);
+    return fields.find((el) => /descri[cç][aã]o|description/i.test(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('placeholder') || ''} ${el.getAttribute('name') || ''} ${el.parentElement?.innerText || ''}`))
+      || fields.find((el) => el.tagName === 'TEXTAREA')
+      || null;
+  };
+  const marketplaceIntegerPrice = (value) => {
+    const raw = String(value ?? '').replace(/[^\d,.-]/g, '').trim();
+    const normalized = raw.includes(',')
+      ? raw.replace(/\./g, '').replace(',', '.')
+      : raw.replace(/\.(?=\d{3}(?:\D|$))/g, '');
+    const numeric = Number(normalized);
+    return Number.isFinite(numeric) ? String(Math.ceil(numeric)) : raw;
+  };
+  const marketplaceTitle = (value, maxLength = 100) => {
+    const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+    if (normalized.length <= maxLength) return normalized;
+    const shortened = normalized.slice(0, maxLength + 1).replace(/\s+\S*$/, '').trim();
+    return (shortened || normalized.slice(0, maxLength)).slice(0, maxLength).trim();
+  };
+  const marketplaceExactTextRegex = (value) => new RegExp(`^${String(value || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+  const marketplaceSet = (el, value) => {
+    if (!el) return false;
+    const text = String(value ?? '');
+    el.focus();
+    if (el.isContentEditable) {
+      document.execCommand('selectAll');
+      document.execCommand('insertText', false, text);
+    } else {
+      const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      if (setter) setter.call(el, text); else el.value = text;
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    return true;
+  };
+  const marketplaceType = async (el, value) => {
+    if (!el) return false;
+    const text = String(value ?? '');
+    el.focus();
+    if (el.isContentEditable) {
+      document.execCommand('selectAll');
+      document.execCommand('delete');
+      for (const char of text) {
+        document.execCommand('insertText', false, char);
+        await CC.sleep(12);
+      }
+      return true;
+    }
+    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (!setter) return marketplaceSet(el, text);
+    setter.call(el, '');
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    for (const char of text) {
+      setter.call(el, String(el.value || '') + char);
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: char }));
+      await CC.sleep(12);
+    }
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  };
+  const marketplaceTitleKey = (value) => normalizeMarketplaceText(value).replace(/[^a-z0-9]+/g, ' ').trim();
+  const marketplaceEditTaskKey = '__cc_marketplace_edit_task';
+  const resumeMarketplaceEditTask = async () => {
+    if (window.__CC_marketplaceResumeStarted || host !== 'www.facebook.com') return;
+    window.__CC_marketplaceResumeStarted = true;
+    let task;
+    try { task = JSON.parse(sessionStorage.getItem(marketplaceEditTaskKey) || 'null'); } catch (_) { task = null; }
+    if (!task?.title || !task?.description) return;
+    try {
+      if (location.pathname.startsWith('/marketplace/you/selling')) {
+        await CC.sleep(1800);
+        const wanted = marketplaceTitleKey(task.title);
+        const listing = await CC.waitFor(() => {
+          const links = [...document.querySelectorAll('a[href*="/marketplace/item/"]')]
+            .filter(marketplaceVisible)
+            .map((link) => {
+              const href = link.href || link.getAttribute('href') || '';
+              const id = href.match(/\/marketplace\/item\/(\d+)/)?.[1] || '';
+              const text = marketplaceTitleKey(`${link.innerText || ''} ${link.parentElement?.innerText || ''}`);
+              const score = wanted && text.includes(wanted) ? 2 : wanted && wanted.split(' ').filter(token => token.length >= 4 && text.includes(token)).length ? 1 : 0;
+              return { id, score };
+            })
+            .filter(item => item.id)
+            .sort((a, b) => b.score - a.score)[0];
+          return listing && listing.score > 0 ? listing : null;
+        }, 12000, 250);
+        if (!listing) throw new Error('anúncio recém-publicado não foi localizado em "Seus anúncios"');
+        sessionStorage.setItem(marketplaceEditTaskKey, JSON.stringify({ ...task, listingId: listing.id }));
+        location.href = `https://www.facebook.com/marketplace/edit/?listing_id=${encodeURIComponent(listing.id)}`;
+        return;
+      }
+      if (isMarketplaceEditPage()) {
+        const field = await CC.waitFor(() => marketplaceField(/descri[cç][aã]o|description/i), 12000, 200);
+        if (!field || !await marketplaceType(field, task.description)) throw new Error('campo Descrição não apareceu na edição');
+        await CC.sleep(300);
+        if (!await marketplaceClickWait(/^salvar$|^save$|^publicar$|^publish$/i, 8000)) {
+          throw new Error('campo preenchido, mas botão Salvar não foi encontrado');
+        }
+        sessionStorage.removeItem(marketplaceEditTaskKey);
+        CC.banner(`Marketplace: descrição salva${task.listingId ? ` no anúncio ${task.listingId}` : ''}.`);
+      }
+    } catch (e) {
+      CC.banner(`Marketplace: descrição pendente — ${String(e?.message || e).slice(0, 150)}`);
+    }
+  };
+  const normalizeMarketplaceText = (value) => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const marketplaceMenuOptions = () => [...document.querySelectorAll('[role="option"],[role="menuitem"],[role="listbox"] [role="button"],button,[role="button"],a')]
+    .filter(marketplaceVisible)
+    .map(element => ({ element, text: marketplaceText(element).trim() }))
+    .filter(item => item.text && item.text.length <= 100 && !/^(categoria|category|voltar|back|cancelar|cancel)$/i.test(item.text));
+  const marketplaceTokens = (value) => normalizeMarketplaceText(value).split(/[^a-z0-9]+/).filter(token => token.length >= 3);
+  const marketplaceOptionScore = (text, query) => {
+    const option = normalizeMarketplaceText(text);
+    const tokens = [...new Set(marketplaceTokens(query))];
+    let score = 0;
+    for (const token of tokens) {
+      if (option.includes(token)) score += token.length >= 6 ? 4 : 2;
+    }
+    if (/outros|other|diversos|varios|varias/.test(option)) score -= 1;
+    return score;
+  };
+  async function chooseCurrentMarketplaceOption(query, message, preferredText = '') {
+    const result = await CC.waitFor(() => {
+      const preferred = normalizeMarketplaceText(preferredText).trim();
+      if (preferred) {
+        const header = [...document.querySelectorAll('[aria-label^="Cabeçalho "]')]
+          .filter(marketplaceVisible)
+          .map((element) => ({
+            element: element.closest('[role="button"]') || element,
+            text: String(element.getAttribute('aria-label') || '').replace(/^Cabeçalho\s+/i, '').trim()
+          }))
+          .find((item) => normalizeMarketplaceText(item.text) === preferred);
+        if (header) return header;
+      }
+      const options = marketplaceMenuOptions();
+      if (!options.length) return null;
+      return options.sort((a, b) => marketplaceOptionScore(b.text, query) - marketplaceOptionScore(a.text, query) || a.text.length - b.text.length)[0];
+    }, 5000, 150);
+    if (!result) throw new Error(`Facebook Marketplace: ${message} não encontrada.`);
+    const target = result.element.matches('[role="option"],[role="menuitem"],[role="button"]')
+      ? result.element
+      : (result.element.closest('[role="option"],[role="menuitem"],[role="button"]') || result.element);
+    target.scrollIntoView({block: 'center'});
+    CC.clickDeep(target);
+    await marketplaceStepDelay();
+    return result.text;
+  }
+  async function selectMarketplaceCategory(category, title) {
+    if (!await marketplaceFormClickWait(/categoria|category/i)) throw new Error('Facebook Marketplace: campo Categoria não encontrado no formulário.');
+    await marketplaceStepDelay(900);
+    await chooseCurrentMarketplaceOption(`${category} ${title}`, 'subcategoria', category);
+    await marketplaceStepDelay(900);
+  };
+  async function facebookMarketplace({ text, files, autoPost, marketplaceProduct, marketplaceLocation, marketplaceGroups, marketplaceDelivery }) {
+    const product = marketplaceProduct || {};
+    const data = product.product_data && typeof product.product_data === 'object' ? product.product_data : product;
+    const first = (...values) => values.find((v) => v !== undefined && v !== null && String(v).trim() !== '') || '';
+    const title = marketplaceTitle(first(product.title, data.title, 'Produto'));
+    const price = first(product.price, data.price, data.currentPrice);
+    const category = first(product.category, data.category);
+    const affiliateValues = [data.affiliate, data.affiliateUrl, data.affiliateLink, product.affiliate, product.affiliateUrl, product.affiliateLink]
+      .filter(Boolean).map(value => String(value).trim()).filter(Boolean);
+    const isAffiliateUrl = (url) => /(?:meli\.la|mercadolivre\.com\/sec\/|mercadolivre\.com\.br\/afiliados|shopee\.com\.br\/universal-link)/i.test(url)
+      || affiliateValues.some(value => value === url);
+    const marketplaceNotice = 'Preços sujeitos a alteração. O frete deve ser calculado no site da loja.';
+    const description = `${String(first(data.description, data.details, text, title))
+      .replace(/https?:\/\/[^\s<>"']+/gi, (url) => isAffiliateUrl(url.replace(/[),.;]+$/, '')) ? '' : url)
+      .replace(/[ \t]{2,}/g, ' ').trim()}\n\n${marketplaceNotice}`;
+    if (!files?.length) throw new Error('Facebook Marketplace: adicione pelo menos uma foto do produto.');
+    await CC.waitFor(() => location.pathname.startsWith('/marketplace'), 12000);
+    if (!await marketplaceClickWait(/criar novo classificado|create new listing/i)) throw new Error('Facebook Marketplace: botão "Criar novo classificado" não encontrado.');
+    await CC.sleep(700);
+    if (!await marketplaceClickWait(/^item para venda$|item for sale/i)) throw new Error('Facebook Marketplace: opção "Item para venda" não encontrada.');
+    await CC.waitFor(() => isMarketplaceCreatePage(), 10000);
+    ensureMarketplaceCreatePage();
+    await marketplaceStepDelay(1200);
+    const input = need(await CC.waitFor(() => [...document.querySelectorAll('input[type="file"]')].find(marketplaceVisible), 10000), 'Facebook Marketplace: campo de fotos não apareceu.');
+    CC.attach(input, files.slice(0, 10));
+    await marketplaceStepDelay(1300);
+    const titleField = marketplaceField(/t[ií]tulo|title/i);
+    if (!await marketplaceType(titleField, title)) throw new Error('Facebook Marketplace: campo Título não encontrado.');
+    await marketplaceStepDelay(1100);
+    const priceField = marketplaceField(/pre[cç]o|price/i);
+    if (priceField && price !== '') await marketplaceType(priceField, marketplaceIntegerPrice(price));
+    await marketplaceStepDelay(1100);
+    await selectMarketplaceCategory(first(product.category, data.category), title);
+    if (await marketplaceClickWait(/condi[cç][aã]o|condition/i)) {
+      await marketplaceStepDelay(900);
+      if (!await marketplaceClickWait(/^novo$|^new$/i)) throw new Error('Facebook Marketplace: opção de condição "Novo" não encontrada.');
+      await marketplaceStepDelay(1000);
+    }
+    let descriptionPending = false;
+    const detailsField = await CC.waitFor(() => marketplaceDescriptionField() || marketplaceField(/descri[cç][aã]o|description/i), 12000, 200);
+    if (!detailsField || !await marketplaceType(detailsField, description)) {
+      descriptionPending = true;
+    } else {
+      await marketplaceStepDelay(1100);
+    }
+    const locationValue = marketplaceLocation || 'Seropédica - Rio de Janeiro';
+    const locationField = marketplaceField(/localiza[cç][aã]o|location/i);
+    if (!await marketplaceType(locationField, locationValue)) throw new Error('Facebook Marketplace: campo de localização não encontrado.');
+    await marketplaceStepDelay(1100);
+    const locationParts = String(locationValue).split(/\s*[-,]\s*/, 2).filter(Boolean);
+    const selectedLocation = locationParts.length >= 2
+      ? new RegExp(`^${locationParts[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*,\\s*${locationParts[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
+      : marketplaceExactTextRegex(locationValue);
+    if (!await marketplaceClickWait(selectedLocation, 8000)) throw new Error('Facebook Marketplace: sugestão de localização não encontrada para validar a cidade.');
+    await marketplaceStepDelay(900);
+    if (marketplaceDelivery) {
+      const controls = [...document.querySelectorAll('input[type="checkbox"],[role="checkbox"]')].filter(marketplaceVisible);
+      const controlText = (el) => `${el.getAttribute('aria-label') || ''} ${el.parentElement?.innerText || ''}`.replace(/\s+/g, ' ').trim();
+      controls.filter((el) => /retirada|pickup/i.test(controlText(el))).forEach((el) => {
+        if ((el.type === 'checkbox' && el.checked) || el.getAttribute('aria-checked') === 'true') btnOf(el).click();
+      });
+      const delivery = controls.find((el) => /^(entrega|delivery)$|\b(entrega|delivery)\b/i.test(controlText(el)) && !/retirada|pickup/i.test(controlText(el)));
+      if (delivery && ((delivery.type === 'checkbox' && !delivery.checked) || delivery.getAttribute('aria-checked') === 'false')) btnOf(delivery).click();
+      await marketplaceStepDelay(900);
+    }
+    if (!await marketplaceClickWait(/^avan[cç]ar$|^next$/i)) throw new Error('Facebook Marketplace: botão Avançar não encontrado.');
+    await marketplaceStepDelay(1300);
+    const groups = Math.max(0, Math.min(10, Number(marketplaceGroups) || 0));
+    if (groups) {
+      await marketplaceClickWait(/publicar em mais lugares|post in more places|grupos/i);
+      await marketplaceStepDelay(900);
+      const checks = [...document.querySelectorAll('input[type="checkbox"],[role="checkbox"]')].filter((el) => marketplaceVisible(el));
+      checks.slice(0, groups).forEach((el) => {
+        if ((el.type === 'checkbox' && !el.checked) || el.getAttribute('aria-checked') === 'false') btnOf(el).click();
+      });
+      await marketplaceStepDelay(1000);
+    }
+    if (!autoPost) return 'Classificado do Marketplace preparado. Revise fotos, dados e grupos antes de publicar.';
+    if (!await marketplacePublishWait()) throw new Error('Facebook Marketplace: botão Publicar não encontrado.');
+    await CC.sleep(2500);
+    if (descriptionPending) {
+      sessionStorage.setItem(marketplaceEditTaskKey, JSON.stringify({ title, description }));
+      location.href = 'https://www.facebook.com/marketplace/you/selling';
+      return 'Classificado publicado; procurando o anúncio em Seus anúncios para preencher a descrição.';
+    }
+    return 'Classificado do Marketplace enviado. Confira a confirmação do Facebook.';
+  }
+
   async function tiktok({ text, file, files, autoPost, mediaType }) {
     files = (files && files.length ? files : (file ? [file] : []));
     file = files[0];
@@ -171,11 +551,22 @@
     const findCaption = () => {
       const selectors = [
         '.public-DraftEditor-content[contenteditable="true"]',
-        '[contenteditable="true"][data-placeholder]',
+        'textarea[placeholder*="description" i]',
+        'textarea[placeholder*="descri" i]',
+        'textarea[aria-label*="description" i]',
+        'textarea[aria-label*="descri" i]',
+        'textarea[data-placeholder*="description" i]',
+        'textarea[data-placeholder*="descri" i]',
+        '[contenteditable="true"][data-placeholder*="description" i]',
+        '[contenteditable="true"][data-placeholder*="descri" i]',
         '[contenteditable="true"][aria-label*="caption" i]',
         '[contenteditable="true"][aria-label*="legenda" i]',
+        '[contenteditable="true"][aria-label*="description" i]',
+        '[contenteditable="true"][aria-label*="descri" i]',
         'textarea[placeholder*="caption" i]',
         'textarea[placeholder*="legenda" i]',
+        'textarea[placeholder*="describe" i]',
+        '[contenteditable="true"][data-placeholder]',
         'div[contenteditable="true"]',
         'textarea'
       ];
@@ -189,50 +580,12 @@
       ? 'TikTok Foto: a caixa de legenda não ficou disponível em até 60 segundos após o upload da imagem.'
       : 'TikTok Vídeo: a caixa de legenda não ficou disponível em até 60 segundos após o upload do vídeo. Confira se o vídeo terminou de carregar e se a tela de publicação está aberta.');
     CC.banner(actualMediaType === 'photo' ? 'TikTok Foto: caixa de legenda encontrada; digitando o texto gradualmente...' : 'TikTok Vídeo: caixa de legenda encontrada; preenchendo o texto...');
-    if (actualMediaType === 'photo' && ed.isContentEditable) {
-      // O TikTok pode rejeitar a inserção direta via paste. Foca o editor e insere
-      // o conteúdo em pequenos passos, em vez de despejar a legenda inteira de uma vez.
-      ed.click();
-      ed.focus();
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(ed);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      document.execCommand('delete');
-      await CC.sleep(180);
-      const caption = String(text || '');
-      for (const char of caption) {
-        if (char === '\n') {
-          document.execCommand('insertLineBreak');
-        } else {
-          document.execCommand('insertText', false, char);
-        }
-        await CC.sleep(18);
-      }
-      ed.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: null }));
-    } else if (actualMediaType === 'video' && ed.isContentEditable) {
-      // O TikTok pode preencher automaticamente a legenda com o nome do arquivo.
-      // Primeiro seleciona e apaga TODO o conteúdo existente; só então digita o texto programado.
-      ed.click();
-      ed.focus();
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(ed);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      document.execCommand('delete');
-      ed.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
-      await CC.sleep(250);
-      const caption = String(text || '');
-      for (const char of caption) {
-        if (char === '\n') {
-          document.execCommand('insertLineBreak');
-        } else {
-          document.execCommand('insertText', false, char);
-        }
-        await CC.sleep(18);
-      }
+    if (ed.isContentEditable) {
+      // Uma inserção por caractere faz o editor controlado do TikTok reposicionar
+      // o cursor e inverter/reordenar blocos. Usa o caminho de paste do utilitário,
+      // com fallback por linha apenas se o TikTok rejeitar o evento.
+      const caption = String(text || '').trim();
+      CC.setText(ed, caption);
       ed.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: null }));
     } else {
       // Para campos input/textarea, zera o nome automático antes de inserir a legenda.
@@ -478,8 +831,8 @@
     'studio.youtube.com': youtube,
   };
 
-  CC.handlers.POST_FILL = async ({ fileId, fileIds, text, title, autoPost, mediaType }) => {
-    const fn = need(RUN[host], 'Rede não suportada: ' + host);
+  CC.handlers.POST_FILL = async ({ fileId, fileIds, text, title, autoPost, mediaType, destination, marketplaceProduct, marketplaceLocation, marketplaceGroups, marketplaceDelivery }) => {
+    const fn = host === 'www.facebook.com' && destination === 'marketplace' ? facebookMarketplace : need(RUN[host], 'Rede não suportada: ' + host);
     const ids = (Array.isArray(fileIds) && fileIds.length ? fileIds : (fileId ? [fileId] : []));
     const files = ids.map(id => CC.files[id]).filter(Boolean);
     if (ids.length && files.length !== ids.length) throw new Error('Uma ou mais fotos não chegaram completas à aba.');
@@ -487,8 +840,9 @@
     // Hashtags are plain text while composing; the platforms make them clickable after publishing.
     // Normalize accidental missing spaces between a word and a hashtag without altering hashtag spelling.
     const postText = String(text || '').replace(/([^\s#])(#\w)/gu, '$1 $2');
-    const msg = await fn({ text: postText, file, files, title, autoPost: !!autoPost, mediaType: mediaType || (file?.type?.startsWith('image/') ? 'photo' : 'video') });
+    const msg = await fn({ text: postText, file, files, title, autoPost: !!autoPost, mediaType: mediaType || (file?.type?.startsWith('image/') ? 'photo' : 'video'), marketplaceProduct, marketplaceLocation, marketplaceGroups, marketplaceDelivery });
     CC.banner('Centro de Comando: ' + msg);
     return { ok: true, msg };
   };
+  if (host === 'www.facebook.com') setTimeout(() => { void resumeMarketplaceEditTask(); }, 0);
 })();

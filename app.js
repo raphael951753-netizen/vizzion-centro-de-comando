@@ -55,19 +55,26 @@ const waitLoad = (id) => new Promise((res) => {
   setTimeout(() => { chrome.tabs.onUpdated.removeListener(f); res(); }, 30000);
 });
 
-async function getNetTab(net, { open = true, navigate = false, mediaType = 'video' } = {}) {
+async function getNetTab(net, { open = true, navigate = false, mediaType = 'video', destination = 'feed' } = {}) {
   const n = NETS[net];
   // TikTok Studio tem rotas diferentes para publicação de vídeo e de foto.
   const targetUrl = net === 'tiktok'
     ? `https://www.tiktok.com/tiktokstudio/upload?from=creator_center&tab=${mediaType === 'photo' ? 'photo' : 'video'}`
+    : net === 'facebook' && destination === 'marketplace'
+      ? 'https://www.facebook.com/marketplace/?ref=bookmark'
     : n.url;
-  const tabs = (await chrome.tabs.query(net === 'whatsapp' ? {} : { windowId: winId })).filter((t) => t.url && new URL(t.url).hostname === n.host);
+  const tabs = (await chrome.tabs.query(net === 'whatsapp' ? {} : { windowId: winId })).filter((t) => {
+    if (!t.url || new URL(t.url).hostname !== n.host) return false;
+    if (net !== 'facebook') return true;
+    const isMarketplace = new URL(t.url).pathname.startsWith('/marketplace');
+    return destination === 'marketplace' ? isMarketplace : !isMarketplace;
+  });
   let t = tabs[0];
   if (!t && open) {
     t = await chrome.tabs.create({ windowId: winId, url: targetUrl, active: false });
     await waitLoad(t.id);
     await sleep(1500);
-  } else if (t && navigate && n.navigate && t.url !== targetUrl) {
+  } else if (t && navigate && (n.navigate || destination === 'marketplace') && t.url !== targetUrl) {
     await chrome.tabs.update(t.id, { url: targetUrl });
     await waitLoad(t.id);
     await sleep(1500);
@@ -110,10 +117,18 @@ async function refreshNotificationCounts(silent = true) {
   }
   notificationCounts = next;
   notificationCountsUpdatedAt = Date.now();
+  if (route !== 'login') {
+    for (const net of targets) {
+      const value = notificationCounts[net];
+      const counter = document.querySelector(`[data-notification-count="${net}"]`);
+      if (counter) counter.textContent = value == null ? '—' : value > 0 ? String(value) : '0';
+    }
+    const updated = document.querySelector('[data-notification-count-updated]');
+    if (updated) updated.textContent = 'Atualizado ' + new Date(notificationCountsUpdatedAt).toLocaleTimeString('pt-BR');
+  }
   if (!silent) {
-    render();
     toast('Contadores atualizados pelos títulos das abas das redes.');
-  } else if (route !== 'login') render();
+  }
 }
 
 async function sendFile(tabId, net, file) {
@@ -133,28 +148,46 @@ async function sendFile(tabId, net, file) {
 
 /* ---------- fotos de produtos no atendimento ---------- */
 const photoMax = () => { const v = S.settings.botPhotosMax; return (v === undefined || v === '' || v === null) ? 3 : Math.max(0, Math.min(6, Number(v) || 0)); };
-async function photoFilesFor(found, text, max) {
+async function productMediaFilesFor(found, text, max, options = {}) {
   const t = String(text || ''), tl = t.toLowerCase();
-  // só os produtos que a resposta realmente cita (pelo link ou pelo início do nome)
-  const picked = (found || []).filter((p) => p.image && ((p.url && t.includes(p.url)) || (p.title && tl.includes(String(p.title).toLowerCase().slice(0, 25))))).slice(0, max);
+  const picked = (found || []).filter((p) => (p.url && t.includes(p.url)) || (p.title && tl.includes(String(p.title).toLowerCase().slice(0, 25)))).slice(0, max);
+  const mediaUrls = (p) => {
+    const data = p.product_data && typeof p.product_data === 'object' ? p.product_data : p;
+    const values = (value) => Array.isArray(value) ? value : value ? [value] : [];
+    const urls = (value) => values(value).map(item => typeof item === 'string' ? item : item?.url || item?.src || item?.link || '').filter(value => /^https?:\/\//i.test(value));
+    const images = options.primaryImageOnly
+      ? [...urls(p.image)]
+      : [...urls(data.images), ...urls(data.imageUrls), ...urls(data.photos), ...urls(data.image), ...urls(p.image)];
+    const videos = [...urls(data.videos), ...urls(data.videoUrls), ...urls(data.video), ...urls(data.media)].filter(url => /\.(mp4|webm|mov)(?:[?#]|$)/i.test(url) || /video/i.test(url));
+    return { image: [...new Set(images)][0] || '', video: [...new Set(videos)][0] || '' };
+  };
   const files = [];
   for (const p of picked) {
-    try {
-      const r = await fetch(p.image, { referrerPolicy: 'no-referrer' });
-      if (!r.ok) continue;
-      const blob = await r.blob();
-      if (!blob.type.startsWith('image/') || blob.size > 8 * 1024 * 1024) continue;
-      // converte tudo para JPEG (webp colado no WhatsApp pode virar figurinha) e limita o tamanho
-      const bmp = await createImageBitmap(blob);
-      const k = Math.min(1, 1200 / Math.max(bmp.width, bmp.height));
-      const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
-      const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(bmp, 0, 0, c.width, c.height);
-      const out = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.88));
-      if (out) files.push(new File([out], `produto-${files.length + 1}.jpg`, { type: 'image/jpeg' }));
-    } catch (e) { console.warn('foto não baixada', p.image, e); }
+    const media = mediaUrls(p);
+    for (const [url, type] of [[media.image, 'image'], [media.video, 'video']]) {
+      if (!url) continue;
+      try {
+        const r = await fetch(url, { referrerPolicy: 'no-referrer' });
+        if (!r.ok) continue;
+        const blob = await r.blob();
+        if (type === 'video') {
+          if (!blob.type.startsWith('video/') || blob.size > 50 * 1024 * 1024) continue;
+          files.push({ file: new File([blob], `produto-${files.length + 1}.mp4`, { type: blob.type }), type });
+          continue;
+        }
+        if (!blob.type.startsWith('image/') || blob.size > 8 * 1024 * 1024) continue;
+        const bmp = await createImageBitmap(blob);
+        const k = Math.min(1, 1200 / Math.max(bmp.width, bmp.height));
+        const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+        const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(bmp, 0, 0, c.width, c.height);
+        const out = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.88));
+        if (out) files.push({ file: new File([out], `produto-${files.length + 1}.jpg`, { type: 'image/jpeg' }), type });
+      } catch (e) { console.warn('mídia não baixada', url, e); }
+    }
   }
   return files;
 }
+const photoFilesFor = async (found, text, max) => (await productMediaFilesFor(found, text, max)).filter(item => item.type === 'image').map(item => item.file);
 
 // O WhatsApp só desenha a tela de pré-visualização da foto com a aba visível. Se a aba está oculta (mesma janela do
 // Centro de Comando), ela é trazida para frente só durante o envio das fotos e a aba anterior volta depois.
@@ -184,9 +217,10 @@ async function sendPhotos(net, expectedChat, files, caption = '') {
 const DEFAULT_BACKEND_URL = 'https://ttytmrjqjkdqeksyoxts.supabase.co/functions/v1/vizzion-api';
 const DEFAULT = () => ({
   users: [],
-  settings: { provider: 'gemini', model: 'gemini-3.5-flash-lite', apiKey: 'AQ.Ab8RN6LhT15_t8yuqfSrC3BfQl1hAPdD0srP5R2eH5TSU3Hs2g', apiUrl: '', backendUrl: DEFAULT_BACKEND_URL, backendToken: '', stagesPerDay: 2, autoMaxPerHour: 20, botPhotosMax: 3, photoTabSwitch: true },
+  settings: { backendUrl: DEFAULT_BACKEND_URL, backendToken: '', mcpUrl: 'http://127.0.0.1:8787', mcpToken: '', stagesPerDay: 2, autoMaxPerHour: 20, botPhotosMax: 3, photoTabSwitch: true },
   offerSendQueue: [],
-  general: { stages: [], note: '' },
+  general: { stages: [], note: '', messages: [] },
+  chat: { channels: [{ id: 'geral', name: 'Geral' }, { id: 'ia', name: 'IA · Migoo', type: 'ia' }], messages: [] },
   projects: [],
   tasks: [],
   postsLog: [],
@@ -196,22 +230,29 @@ const DEFAULT = () => ({
   insights: null,
   updatedAt: 0,
 });
-let S, P = [], me = null, AUTH = null, ACTIVITY = [], route = 'hoje';
+let S, P = [], me = null, AUTH = null, ACTIVITY = [], route = 'hoje', routeChat = 'geral';
 const proj = (id) => S.projects.find((p) => p.id === id);
 const user = (id) => S.users.find((u) => u.id === id);
 const stagesOf = (sc) => (sc === 'general' ? S.general.stages : proj(sc)?.stages || []);
-// A equipe tem permissões iguais; o perfil serve para identificar ações, não para hierarquia.
-const isAdmin = () => !!me;
-const myProjects = () => (isAdmin() ? S.projects : S.projects.filter((p) => p.memberIds?.includes(me.id)));
+const isMasterAdmin = () => me?.role === 'masteradmin';
+const isAdmin = () => me?.role === 'admin' || isMasterAdmin();
+const myProjects = () => (isMasterAdmin() ? S.projects : S.projects.filter((p) => p.memberIds?.includes(me.id)));
 
 async function load() {
   const r = await chrome.storage.local.get(['cc_state', 'cc_products', 'cc_auth', 'cc_profile']);
   S = Object.assign(DEFAULT(), r.cc_state || {});
   S.settings = Object.assign(DEFAULT().settings, S.settings);
-  // Migração automática: mantém Gemini ativo e preenche as definições pedidas sem exigir teste manual.
-  S.settings.provider = 'gemini';
-  S.settings.model = 'gemini-3.5-flash-lite';
-  if (!String(S.settings.apiKey || '').trim()) S.settings.apiKey = DEFAULT().settings.apiKey;
+  S.general = Object.assign(DEFAULT().general, S.general);
+  S.general.messages = Array.isArray(S.general.messages) ? S.general.messages : [];
+  S.chat = Object.assign(DEFAULT().chat, S.chat || {});
+  S.chat.channels = Array.isArray(S.chat.channels) ? S.chat.channels : DEFAULT().chat.channels;
+  S.chat.messages = Array.isArray(S.chat.messages) ? S.chat.messages : [];
+  const hadLegacyAiSettings = ['apiKey', 'apiUrl', 'provider', 'model'].some((key) => Object.prototype.hasOwnProperty.call(S.settings, key));
+  delete S.settings.apiKey;
+  delete S.settings.apiUrl;
+  delete S.settings.provider;
+  delete S.settings.model;
+  if (hadLegacyAiSettings) await chrome.storage.local.set({ cc_state: S });
   S.offerSendQueue = Array.isArray(S.offerSendQueue) ? S.offerSendQueue : [];
   S.offerSendQueue.forEach(q => { if (q.status === 'enviando') { q.status = 'erro'; q.error = 'Painel fechado durante o envio; confira a conversa antes de retomar para evitar duplicação.'; } });
   S.settings.backendUrl = DEFAULT_BACKEND_URL;
@@ -291,6 +332,10 @@ async function refreshTeam() {
 
 async function pushRemote() {
   if (!AUTH?.access_token || !base()) return false;
+  if (!S.projects.length && !S.tasks.length && !S.postsLog.length) {
+    console.warn('push state blocked: local shared state is empty');
+    return false;
+  }
   try { await api('/state', { method: 'PUT', body: JSON.stringify(shared()) }); return true; }
   catch (e) { console.warn('push state', e); return false; }
 }
@@ -310,16 +355,45 @@ async function pullRemote(force = false) {
     return true;
   } catch (e) { console.warn('pull state', e); return false; }
 }
-async function pushProductsRemote() {
+async function pushProductsRemote(projectId = '', sourceProducts = null) {
   if (!AUTH?.access_token || !base()) return false;
-  try { await api('/products', { method: 'PUT', body: JSON.stringify({ products: P }) }); return true; }
+  try {
+    const groups = projectId
+      ? [[String(projectId), Array.isArray(sourceProducts) ? sourceProducts : P.filter(p => String(p.projectId || '') === String(projectId))]]
+      : [...P.reduce((map, product) => {
+        const id = String(product?.projectId || '');
+        if (!id) return map;
+        if (!map.has(id)) map.set(id, []);
+        map.get(id).push(product);
+        return map;
+      }, new Map())];
+    if (!groups.length) return false;
+    for (const [id, products] of groups) {
+      if (!products.length) continue;
+      for (let offset = 0; offset < products.length; offset += 500) {
+        const batch = products.slice(offset, offset + 500);
+        const final = offset + batch.length >= products.length;
+        await api('/products/import', {
+          method: 'POST',
+          body: JSON.stringify({
+            projectId: id,
+            products: batch,
+            finalize: final,
+            productIds: final ? products.map(p => String(p.id)) : undefined,
+          }),
+        });
+        toast(`Sincronizando catálogo: ${Math.min(offset + batch.length, products.length)} de ${products.length} produtos...`);
+      }
+    }
+    return true;
+  }
   catch (e) { console.warn('push products', e); return false; }
 }
 async function pullProductsRemote() {
   if (!AUTH?.access_token || !base()) return false;
   try {
     const j = await api('/products');
-    if (Array.isArray(j.products) && j.products.length) {
+    if (Array.isArray(j.products)) {
       P = j.products; IDX.clear(); await chrome.storage.local.set({ cc_products: P }); return true;
     }
     return false;
@@ -378,14 +452,16 @@ function localSearch(q, limit = 6) {
     return { p, s: s ? s + Math.log10(1 + p.sales) * 0.2 + (p.rating || 0) * 0.05 : 0 };
   }).filter((x) => x.s > 0).sort((a, b) => b.s - a.s).slice(0, limit).map((x) => x.p);
 }
-async function search(q, limit = 6) {
+async function search(q, limit = 6, projectId = '', options = {}) {
   if (S.settings.backendUrl) {
     try {
-      const j = await api('/search', { method: 'POST', body: JSON.stringify({ query: q, limit }) });
+      const j = await api('/search', { method: 'POST', body: JSON.stringify({ query: q, limit, projectId, category: options.category || '', titleOnly: options.titleOnly === true, excludeTerms: options.excludeTerms || [] }) });
       return (j.products || []).map(normProduct).filter(Boolean);
     } catch (e) { console.warn('search backend', e); }
   }
-  return localSearch(q, limit);
+  return localSearch(q, limit).filter((p) => (!projectId || String(p.projectId || '') === String(projectId)) &&
+    (!options.category || strip(p.category) === strip(options.category)) &&
+    (!options.titleOnly || strip(p.title).includes(strip(q))));
 }
 const pct = (p) => (p.oldPrice && p.price ? Math.round((1 - p.price / p.oldPrice) * 100) : 0);
 function offers(n = 5) {
@@ -395,19 +471,14 @@ function offers(n = 5) {
 const offerBlock = (p) => `🔥 ${p.title}\n💰 ${p.oldPrice ? `de ${brl(p.oldPrice)} ` : ''}por ${brl(p.price)}${pct(p) > 0 ? ` (${pct(p)}% OFF)` : ''}\n👉 ${p.url || ''}`;
 
 /* ---------- IA ---------- */
-async function ai(system, user, max = 900) {
-  const s = S.settings;
-  if (!s.apiKey) throw new Error('Cadastre a chave gratuita do Gemini em Configurações.');
-  if ((s.provider || 'gemini') === 'anthropic') {
-    const r = await fetch(s.apiUrl || 'https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': s.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify({ model: s.model || 'claude-3-5-haiku-latest', max_tokens: max, system, messages: [{ role: 'user', content: user }] }) });
-    const j = await r.json(); if (!r.ok) throw new Error(j?.error?.message || 'Erro na API (' + r.status + ')');
-    return (j.content || []).map((c) => c.text || '').join('').trim();
-  }
-  const model = s.model || 'gemini-2.5-flash';
-  const url = s.apiUrl || `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(s.apiKey)}`;
-  const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: [{ text: user }] }], generationConfig: { maxOutputTokens: max, temperature: 0.7 } }) });
-  const j = await r.json(); if (!r.ok) throw new Error(j?.error?.message || 'Erro na API Gemini (' + r.status + ')');
-  return (j.candidates?.[0]?.content?.parts || []).map((c) => c.text || '').join('').trim();
+async function ai(system, user, max = 900, projectId = '') {
+  const id = projectId || myProjects()[0]?.id;
+  if (!id) throw new Error('Selecione um projeto autorizado para usar a IA.');
+  const result = await api(`/projects/${encodeURIComponent(id)}/ai/generate`, {
+    method: 'POST',
+    body: JSON.stringify({ system, user, max, model: proj(id)?.aiModel || '' }),
+  });
+  return String(result.text || '').trim();
 }
 const parseJSON = (t) => { const m = t.match(/[\[{][\s\S]*[\]}]/); return JSON.parse(m ? m[0] : t); };
 const DEFAULT_SEARCHING = 'Já vou procurar isso pra você, um instante! 🔎 (Os preços podem mudar: vale o valor da página no momento da compra.)';
@@ -415,19 +486,46 @@ const productCaption = (p) => [p.title, p.category ? `Categoria: ${p.category}` 
 const DEFAULT_HANDOFF = 'Vou chamar um atendente humano para te ajudar. Só um instante! 🙌';
 
 async function botReply({ project, history, customerMsg, onIntent }) {
-  let terms = [customerMsg], budget = null, intent = 'outro';
+  const greeting = /^(oi|ola|olá|bom dia|boa tarde|boa noite|hey|hello| tudo bem[\s!?]*)$/i.test(String(customerMsg || '').trim());
+  if (greeting) {
+    const bot = project?.bot || {};
+    const text = await ai(
+      `Você é o atendente inicial de ${bot.brand || 'uma loja de achadinhos'}. ${bot.persona || 'Seja simpático, direto e curto.'}
+Responda naturalmente ao cumprimento, apresente-se e pergunte o que a pessoa procura.
+Não ofereça atendimento humano, não use o marcador [HUMANO] e não invente produtos.`,
+      `Conversa recente:\n${history || '(início da conversa)'}\n\nMensagem do cliente: ${customerMsg}`,
+      240,
+      project?.id,
+    );
+    return { text, human: false, found: [], mode: 'conversation' };
+  }
+  let terms = [customerMsg], budget = null, intent = 'outro', excludeTerms = [];
+  let category = '', titleOnly = false;
+  const categories = [...new Set(P.filter((p) => !project?.id || String(p.projectId || '') === String(project.id)).map((p) => String(p.category || '').trim()).filter(Boolean))].slice(0, 100);
   try {
     const plan = await ai(
-      'Você extrai termos de busca de catálogo. Responda SOMENTE JSON: {"termos":["..."],"orcamento":numero|null,"intencao":"produtos"|"kit"|"outro"}. intencao="produtos" quando o cliente pergunta por, procura ou pede para ver produto(s) específicos ou uma categoria (ex.: "tem iphone?", "quero um guarda-roupa", "me mostra fogões"); "kit" para pedidos amplos de montar ambiente/conjunto; "outro" para dúvidas, humano, reclamação ou conversa. Para pedidos amplos ("monte um quarto", "monte um computador") liste de 3 a 8 itens/categorias de produtos necessários. Para dúvidas sobre compra, entrega ou pagamento sem produto, termos=[].',
-      'Mensagem: ' + customerMsg, 300);
-    const j = parseJSON(plan); terms = j.termos || []; budget = j.orcamento; intent = j.intencao || 'outro';
+      `Você interpreta pedidos de clientes para buscar produtos. Responda SOMENTE JSON:
+{"termos":["..."],"orcamento":numero|null,"intencao":"produtos"|"kit"|"outro","categoria":"...","buscaPrincipal":true|false,"excluir":["..."]}.
+Use intencao="produtos" para um item ou uma família de produto; "kit" para montar um conjunto; "outro" para dúvidas, conversa ou pedido de humano.
+Para produto principal, buscaPrincipal=true e gere termos específicos de produto (ex.: "celular" -> "smartphone", "iphone", "samsung", quando fizer sentido).
+Quando o cliente pedir um produto principal, não trate acessórios, peças, refis ou complementos como o produto pedido. Gere em "excluir" somente palavras que indiquem esses itens secundários para este pedido. Ex.: celular -> capa, cabo, carregador; sofá -> capa, almofada; impressora -> cartucho, toner. Se o cliente pedir explicitamente um acessório ou peça, deixe "excluir" vazio.
+Escolha categoria somente desta lista exata, quando houver correspondência: ${JSON.stringify(categories)}.
+Para pedidos amplos, liste de 3 a 8 itens/categorias. Para dúvidas sem produto, termos=[] e buscaPrincipal=false.`,
+      'Mensagem: ' + customerMsg, 300, project?.id);
+    const j = parseJSON(plan);
+    terms = Array.isArray(j.termos) ? j.termos : [];
+    budget = j.orcamento;
+    intent = j.intencao || 'outro';
+    category = categories.find((value) => strip(value) === strip(j.categoria || '')) || '';
+    titleOnly = j.buscaPrincipal === true;
+    excludeTerms = Array.isArray(j.excluir) ? j.excluir.map((term) => String(term).trim()).filter((term) => term.length > 1 && term.length < 50).slice(0, 12) : [];
   } catch (_) {}
   // Modo vitrine: limite configurável por projeto; cada item vira uma mensagem própria no atendimento.
   if (intent === 'produtos' && terms.length) {
     const configuredMax = Number(project?.bot?.productsPerRequest);
     const productsPerRequest = Math.max(1, Math.min(20, Number.isFinite(configuredMax) && configuredMax > 0 ? configuredMax : 5));
     let pool = [];
-    for (const t of terms.slice(0, 3)) for (const p of await search(t, 6)) if (!pool.find((f) => f.id === p.id)) pool.push(p);
+    for (const t of terms.slice(0, 3)) for (const p of await search(t, 6, project?.id, { category, titleOnly, excludeTerms })) if (!pool.find((f) => f.id === p.id)) pool.push(p);
     if (budget) { const ok = pool.filter((p) => p.price && p.price <= budget); if (ok.length) pool = ok; }
     pool = pool.slice(0, productsPerRequest);
     if (pool.length) {
@@ -436,7 +534,7 @@ async function botReply({ project, history, customerMsg, onIntent }) {
     }
   }
   const found = [];
-  for (const t of terms.slice(0, 8)) for (const p of await search(t, 3)) if (!found.find((f) => f.id === p.id)) found.push(p);
+  for (const t of terms.slice(0, 8)) for (const p of await search(t, 3, project?.id, { category, titleOnly, excludeTerms })) if (!found.find((f) => f.id === p.id)) found.push(p);
   const catalog = found.slice(0, 20).map((p) => ({ titulo: p.title, preco: p.price, loja: p.store, link: p.url }));
   const bot = project?.bot || {};
   const system = `Você é o assistente de atendimento de ${bot.brand || 'uma loja de achadinhos'} no WhatsApp/Telegram. ${bot.persona || 'Seja simpático, direto e curto.'}
@@ -448,7 +546,7 @@ REGRAS:
 - Respostas curtas, próprias de chat, sem markdown pesado. Inclua o link de cada item sugerido.
 - Se o cliente pedir um humano, reclamar de pedido/pagamento/reembolso ou o assunto fugir do escopo, responda em uma frase e termine com o marcador [HUMANO].`;
   const out = await ai(system,
-    `CATALOGO:\n${JSON.stringify(catalog)}\n\nORCAMENTO: ${budget || 'não informado'}\n\nCONVERSA RECENTE:\n${history}\n\nÚLTIMA MENSAGEM DO CLIENTE: ${customerMsg}\n\nEscreva a resposta.`, 700);
+    `CATALOGO:\n${JSON.stringify(catalog)}\n\nORCAMENTO: ${budget || 'não informado'}\n\nCONVERSA RECENTE:\n${history}\n\nÚLTIMA MENSAGEM DO CLIENTE: ${customerMsg}\n\nEscreva a resposta.`, 700, project?.id);
   return { text: out.replace(/\s*\[HUMANO\]\s*/g, ' ').trim(), human: /\[HUMANO\]/.test(out), found };
 }
 const histStr = (ms = []) => ms.slice(-8).map((m) => `${m.dir === 'in' ? 'Cliente' : 'Nós'}: ${m.text}`).join('\n');
@@ -493,11 +591,20 @@ const postsToday = (pid) => S.postsLog.filter((x) => x.date === today() && x.pro
 /* ============================================================
    TELAS
    ============================================================ */
-const pub = { projectId: '', nets: {}, file: null, productImages: false, text: '', title: '', productId: '', status: {}, mediaType: 'video', autoPost: false, tiktokMode: 'video', postNow: true, scheduleDate: today(), scheduleTime: '12:00' };
+const pub = { projectId: '', nets: {}, facebookDestinations: { feed: false, marketplace: false }, file: null, productImages: false, text: '', title: '', productId: '', productIds: [], status: {}, mediaType: 'video', autoPost: false, marketplaceLocation: 'Seropédica - Rio de Janeiro', marketplaceGroups: 10, marketplaceDelivery: true, tiktokMode: 'video', postNow: true, scheduleDate: today(), scheduleTime: '12:00' };
+const marketplaceVitrineDialog = { open: false, productId: '', marketplaceLocation: 'Seropédica - Rio de Janeiro', postNow: true, scheduleDate: today(), scheduleTime: '12:00', busy: false };
 const att = { net: 'whatsapp', projectId: '', history: [], chat: '', group: false, draft: '', human: false, watching: false, mode: 'auto', log: [], sentTimes: [], sim: '', simOut: '', tabOk: null };
 const off = { projectId: '', net: 'whatsapp', sel: new Set(), vars: [], sent: {}, busy: false, query: '', message: '', selectedProducts: [], recipientSel: [], sendNow: true, scheduleDate: today(), scheduleTime: '12:00', selectAll: false, paused: false };
+function ensureAttProject() {
+  const projects = myProjects();
+  const current = projects.find((project) => String(project.id) === String(att.projectId));
+  if (current) return current;
+  att.projectId = projects[0]?.id || '';
+  return projects[0] || null;
+}
 let insightsBusy = false;
 let projectTab = 'identidade';
+const aiProjectStatus = {};
 const STL = { todo: 'A fazer', doing: 'Em andamento', done: 'Concluída' };
 
 const offerCard = (p, extra = '', showProjectLogo = false) => { const project = proj(p.projectId); return `<div class="offer">${showProjectLogo ? (project?.logo ? `<img class="offer-project-logo" src="${esc(project.logo)}" alt="Logo do projeto" title="Identidade visual do projeto">` : `<span class="offer-project-logo offer-project-placeholder" title="Projeto sem logo cadastrado">${esc((project?.name || 'V').slice(0,1).toUpperCase())}</span>`) : ''}${p.image ? `<img src="${esc(p.image)}" alt="Foto de ${esc(p.title)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.outerHTML='<div class=&quot;offer-placeholder&quot;>Imagem indisponível</div>'">` : '<div class="offer-placeholder">Sem foto</div>'}<div class="grow"><b>${esc(p.title)}</b><div>${brl(p.price)} ${p.oldPrice ? `<s class="muted">${brl(p.oldPrice)}</s> <span class="tag ok">${pct(p)}% OFF</span>` : ''} ${p.store ? `<span class="tag">${esc(p.store)}</span>` : ''}</div></div>${extra}</div>`; };
@@ -505,6 +612,11 @@ const offerCard = (p, extra = '', showProjectLogo = false) => { const project = 
 function taskRow(t) {
   const p = proj(t.projectId), u = user(t.userId); const stage = t.stageId ? stagesOf(t.projectId || 'general').find(s => s.id === t.stageId) : null; const urgency = stage?.urgency || t.urgency || 'green';
   return `<label class="task ${t.done ? 'done' : ''}"><input type="checkbox" data-act="toggleTask" data-id="${t.id}" ${t.done ? 'checked' : ''}><span class="t grow">${esc(t.title)}</span><span class="priority ${urgency}">${urgency === 'red' ? 'Urgente' : urgency === 'yellow' ? 'Prioridade média' : 'Normal'}</span><span class="tag">${p ? esc(p.name) : 'Agência'}</span>${u ? `<span class="tag">Responsável: ${esc(u.name)}</span>` : ''}${t.done && t.completedByName ? `<span class="tag">Concluiu: ${esc(t.completedByName)}</span>` : ''}${!t.userId ? '<span class="tag warn">sem responsável</span>' : ''}</label>`;
+}
+function generalMessages() {
+  const messages = Array.isArray(S.general.messages) ? S.general.messages : [];
+  const legacy = S.general.note ? [{ id: 'legacy-note', text: S.general.note, authorName: 'Recado anterior', createdAt: 0 }] : [];
+  return [...legacy, ...messages].slice(-30);
 }
 
 function stagesEditor(scope, canEdit) {
@@ -519,9 +631,9 @@ const navBtn = (r, l, badge = 0) => `<button class="nav ${route === r ? 'on' : '
 function sidebar() {
   const pendingTasks = S.tasks.filter(t => t.date === today() && !t.done).length;
   return `<aside><div class="brand-lockup"><img class="brand-logo" src="vizzion-logo.png" alt="Vizzion"><div class="brand-copy"><h1>VIZZION</h1><small>OPEN WAYS · EMBRACE THE WORLD</small></div></div><div class="who">${esc(me.name || me.email || 'Integrante')} · equipe · <a data-act="logout">sair</a></div>
-  <div class="nav-h">Interações nas abas abertas</div><div class="interaction-counts">${['instagram','facebook','tiktok','youtube'].map(n=>`<div class="interaction-count"><span>${({instagram:'◎',facebook:'f',tiktok:'♪',youtube:'▶'})[n]} ${NETS[n].name}</span><b>${notificationCounts[n] == null ? '—' : notificationCounts[n] > 0 ? notificationCounts[n] : '0'}</b></div>`).join('')}<button class="btn ghost" data-act="refreshNotificationCounts">Atualizar contadores</button><small class="muted">${notificationCountsUpdatedAt ? 'Atualizado '+new Date(notificationCountsUpdatedAt).toLocaleTimeString('pt-BR') : 'Abra as redes na mesma janela do Chrome.'}</small></div>
+  <div class="nav-h">Interações nas abas abertas</div><div class="interaction-counts">${['instagram','facebook','tiktok','youtube'].map(n=>`<div class="interaction-count"><span>${({instagram:'◎',facebook:'f',tiktok:'♪',youtube:'▶'})[n]} ${NETS[n].name}</span><b data-notification-count="${n}">${notificationCounts[n] == null ? '—' : notificationCounts[n] > 0 ? notificationCounts[n] : '0'}</b></div>`).join('')}<button class="btn ghost" data-act="refreshNotificationCounts">Atualizar contadores</button><small class="muted" data-notification-count-updated>${notificationCountsUpdatedAt ? 'Atualizado '+new Date(notificationCountsUpdatedAt).toLocaleTimeString('pt-BR') : 'Abra as redes na mesma janela do Chrome.'}</small></div>
   ${navBtn('hoje', 'Início', pendingTasks)}${navBtn('agencia', 'Projetos')}${myProjects().map((p) => navBtn('proj:' + p.id, '↳ ' + esc(p.name))).join('')}
-  ${navBtn('atendimento', 'Atendimento')}${navBtn('publicar', 'Publicar')}${navBtn('biblioteca', 'Biblioteca')}${navBtn('usuarios', 'Equipe')}${navBtn('config', 'Configurações')}
+  ${navBtn('atendimento', 'Atendimento')}${navBtn('publicar', 'Publicar')}${navBtn('biblioteca', 'Biblioteca')}${navBtn('chat', 'Chat')}${navBtn('usuarios', 'Equipe')}${navBtn('config', 'Configurações')}
   </aside>`;
 }
 
@@ -536,14 +648,18 @@ function viewHoje() {
   const others = all.filter((t) => t.userId && t.userId !== me.id);
   const prog = myProjects().filter((p) => p.dailyPosts > 0).map((p) => {
     const c = postsToday(p.id);
-    return `<div class="row"><b class="grow">${esc(p.name)}</b><span class="muted">${c}/${p.dailyPosts} posts</span><div class="bar"><i style="width:${Math.min(100, Math.round((c / p.dailyPosts) * 100))}%"></i></div></div>`;
+    const percent = Math.min(100, Math.round((c / p.dailyPosts) * 100));
+    return `<div class="progress-item"><div class="row"><b class="grow">${esc(p.name)}</b><span class="muted">${c}/${p.dailyPosts} posts · ${percent}%</span></div><div class="bar progress-bar"><i style="width:${percent}%"></i></div></div>`;
   }).join('');
+  const taskTotal = mine.length;
+  const taskDone = mine.filter((t) => t.done).length;
+  const taskPercent = taskTotal ? Math.round((taskDone / taskTotal) * 100) : 0;
   return `<h2>Hoje, ${new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })}</h2><p class="sub">Suas tasks do dia e as ofertas sugeridas pela base de produtos.</p>
-  <section><h3>Recado geral</h3><textarea data-path="g|note" data-type="text" placeholder="Escreva um recado para toda a equipe..." style="min-height:90px">${esc(S.general.note||'')}</textarea><p class="muted">O recado é compartilhado com a equipe e salvo ao sair do campo.</p></section>
+  <section><h3>Recados da equipe</h3><div class="general-chat">${generalMessages().map((m) => `<div class="general-message"><div class="row"><b class="grow">${esc(m.authorName || 'Integrante')}</b><span class="muted">${m.createdAt ? new Date(m.createdAt).toLocaleString('pt-BR') : 'recado anterior'}</span></div><div>${esc(m.text)}</div></div>`).join('') || '<p class="muted">Nenhum recado ainda.</p>'}</div><div class="row general-chat-compose"><textarea id="general-message-input" class="grow" placeholder="Escreva um recado para toda a equipe..." rows="2"></textarea><button class="btn" data-act="sendGeneralMessage">Enviar recado</button></div><p class="muted">Os recados ficam compartilhados com a equipe e são sincronizados com o backend.</p></section>
   <section><div class="row"><h3 class="grow">Minhas tasks</h3><button class="btn ghost" data-act="genTasks">Gerar tasks de hoje</button></div>
   ${mine.map(taskRow).join('') || '<p class="muted">Nenhuma task para hoje. As tasks serão geradas automaticamente à meia-noite.</p>'}</section>
   ${others.length ? `<section><h3>Tasks da equipe</h3>${others.map(taskRow).join('')}</section>` : ''}
-  ${prog ? `<section><h3>Meta diária de posts</h3>${prog}</section>` : ''}
+  ${prog || taskTotal ? `<section><h3>Gráfico de progresso</h3><div class="progress-summary"><div class="progress-card"><b>Tasks do dia</b><strong>${taskDone}/${taskTotal}</strong><span class="muted">${taskPercent}% concluídas</span><div class="bar progress-bar"><i style="width:${taskPercent}%"></i></div></div>${prog ? `<div class="progress-projects"><h4>Posts por projeto</h4>${prog}</div>` : ''}</div></section>` : ''}
   <section><div class="row"><h3 class="grow">Insights de conteúdo</h3><button class="btn ghost" data-act="genInsights" ${P.length ? '' : 'disabled'}>${insightsBusy ? 'Gerando…' : 'Gerar insights'}</button></div>${insightsHtml()}</section>`;
 }
 
@@ -556,9 +672,10 @@ function viewAgencia() {
   <div class="project-grid">${myProjects().map((p) => `<article class="social-card">${p.logo ? `<img class="project-logo" src="${esc(p.logo)}" alt="Logo">` : `<div class="project-logo placeholder">${esc((p.name||'V').slice(0,1).toUpperCase())}</div>`}<div class="grow"><h3>${esc(p.name)}</h3><p class="muted">${esc(p.bio || 'Adicione uma bio no perfil do projeto.')}</p><div class="row"><span class="tag">${(p.memberIds || []).length} membros</span><span class="tag">${(p.accounts || []).length} contas</span><span class="tag">${p.tasksPerDay ?? 2} etapas/dia</span></div><button class="btn ghost" data-act="nav" data-r="proj:${p.id}">Abrir projeto</button></div>${ad ? `<button class="x" data-act="delProject" data-id="${p.id}" title="Excluir">✕</button>` : ''}</article>`).join('') || '<p class="muted">Crie o primeiro projeto acima.</p>'}</div>`;
 }
 function viewUsuarios() {
- return `<h2>Equipe Vizzion</h2><p class="sub">Adicione pessoas diretamente por aqui. Todos os integrantes têm as mesmas permissões de trabalho; cada conta serve para identificar quem realizou cada ação.</p>
- <section><h3>Adicionar integrante</h3><div class="grid2"><label>Nome completo<input id="team-name" autocomplete="name" placeholder="Nome da pessoa"></label><label>E-mail de login<input id="team-email" type="email" autocomplete="email" placeholder="pessoa@exemplo.com"></label><label>Senha inicial<input id="team-password" type="password" autocomplete="new-password" minlength="8" placeholder="Mínimo de 8 caracteres"></label></div><p class="muted">A conta será criada imediatamente e o e-mail será confirmado para uso interno. Combine a senha inicial com a pessoa por um canal privado; não use uma senha que ela já utilize em outros serviços.</p><button class="btn" data-act="createTeamMember">Criar conta</button></section>
- <section><div class="row"><h3 class="grow">Integrantes cadastrados</h3><button class="btn ghost" data-act="refreshTeam">Atualizar lista</button></div>${S.users.map((u) => `<div class="social-card"><div class="avatar">${esc((u.name||'?').slice(0,1).toUpperCase())}</div><div class="grow"><b>${esc(u.name || 'Integrante')}</b><div class="muted">${esc(u.email || '')} · ${u.id === me.id ? 'Você · conectado' : 'Integrante da equipe'}<br><span class="muted">Tasks criadas: ${S.tasks.filter(t => t.createdBy === u.id).length} · concluídas: ${S.tasks.filter(t => t.completedBy === u.id).length}</span></div></div>${u.id !== me.id ? `<button class="btn danger" data-act="deleteTeamMember" data-id="${esc(u.id)}" data-name="${esc(u.name || u.email || 'integrante')}">Excluir conta</button>` : ''}</div>`).join('') || `<p class="muted">Não foi possível carregar a lista da equipe. Clique em Atualizar lista.</p>`}</section>`;
+ const canManage = isAdmin(), canChangeRoles = isMasterAdmin();
+ return `<h2>Equipe Vizzion</h2><p class="sub">MASTERADMIN gerencia administradores e membros. ADMIN gerencia apenas membros. MEMBER não gerencia contas.</p>
+ ${canManage ? `<section><h3>Adicionar integrante</h3><div class="grid2"><label>Nome completo<input id="team-name" autocomplete="name" placeholder="Nome da pessoa"></label><label>E-mail de login<input id="team-email" type="email" autocomplete="email" placeholder="pessoa@exemplo.com"></label><label>Senha inicial<input id="team-password" type="password" autocomplete="new-password" minlength="8" placeholder="Mínimo de 8 caracteres"></label>${canChangeRoles ? '<label>Papel<select id="team-role"><option value="member">MEMBER</option><option value="admin">ADMIN</option></select></label>' : ''}</div><p class="muted">A conta será criada imediatamente. Entregue a senha inicial por um canal privado.</p><button class="btn" data-act="createTeamMember">Criar conta</button></section>` : ''}
+ <section><div class="row"><h3 class="grow">Integrantes cadastrados</h3><button class="btn ghost" data-act="refreshTeam">Atualizar lista</button></div>${S.users.map((u) => { const targetRole = u.role || 'member'; const canDelete = u.id !== me.id && (canChangeRoles || targetRole === 'member'); const roleControl = canChangeRoles && u.id !== me.id && targetRole !== 'masteradmin' ? `<select data-act="changeTeamRole" data-id="${esc(u.id)}"><option value="member" ${targetRole === 'member' ? 'selected' : ''}>MEMBER</option><option value="admin" ${targetRole === 'admin' ? 'selected' : ''}>ADMIN</option></select>` : `<span class="tag">${targetRole.toUpperCase()}</span>`; return `<div class="social-card"><div class="avatar">${esc((u.name||'?').slice(0,1).toUpperCase())}</div><div class="grow"><b>${esc(u.name || 'Integrante')}</b><div class="muted">${esc(u.email || '')} · ${u.id === me.id ? 'Você · conectado' : 'Integrante da equipe'}<br>${roleControl}<span class="muted"> · Tasks criadas: ${S.tasks.filter(t => t.createdBy === u.id).length} · concluídas: ${S.tasks.filter(t => t.completedBy === u.id).length}</span></div></div>${canDelete ? `<button class="btn danger" data-act="deleteTeamMember" data-id="${esc(u.id)}" data-name="${esc(u.name || u.email || 'integrante')}">Excluir conta</button>` : ''}</div>`; }).join('') || `<p class="muted">Não foi possível carregar a lista da equipe. Clique em Atualizar lista.</p>`}</section>`;
 }
 function viewHistorico() {
  return `<h2>Histórico da equipe</h2><p class="sub">Registro compartilhado de entradas, tarefas concluídas, projetos e publicações.</p><section><div class="row"><span class="grow muted">Últimas 100 ações</span><button class="btn ghost" data-act="refreshActivity">Atualizar</button></div>${ACTIVITY.map(a => `<article class="social-card"><div class="avatar">${esc((a.display_name || a.email || '?').slice(0,1).toUpperCase())}</div><div class="grow"><b>${esc(a.display_name || a.email || 'Integrante')}</b><div>${esc(a.action_label || a.action)}</div><div class="muted">${new Date(a.created_at).toLocaleString('pt-BR')}${a.details?.title ? ' · ' + esc(a.details.title) : ''}</div></div></article>`).join('') || '<p class="muted">Ainda não há ações registradas. Clique em Atualizar.</p>'}</section>`;
@@ -577,7 +694,9 @@ function viewProjeto(id) {
   const tabs = [['identidade','Identidade'],['vitrine','Vitrine'],['metas','Metas e etapas'],['contas','Redes sociais e atendimento']];
   const tabbar = `<div class="subtabs project-tabs">${tabs.map(([k,l])=>`<button class="btn ${projectTab===k?'':'ghost'}" data-act="projectTab" data-tab="${k}">${l}</button>`).join('')}</div>`;
   let body = '';
-  if (projectTab === 'identidade') body = `<section><h3>Identidade do projeto</h3><div class="profile-head"><div class="profile-upload-wrap"><label class="profile-upload" title="Upload Image"><img src="${p.logo ? esc(p.logo) : 'vizzion-logo.png'}" alt="Imagem do perfil"><span>＋</span><small>Upload Image</small><input type="file" data-act="projectLogo" data-pid="${id}" accept="image/*" ${ad?'':'disabled'}></label>${p.logo && ad ? `<button class="btn ghost" data-act="deleteProjectLogo" data-pid="${id}">Deletar imagem</button>` : ''}</div><div class="grow"><h3>${esc(p.name)}</h3><p class="muted">Imagem redonda como foto de perfil. Clique para trocar; use “Deletar imagem” para removê-la.</p><textarea data-path="p|${id}|bio" data-type="text" placeholder="Bio curta da marca" ${ad?'':'disabled'}>${esc(p.bio||'')}</textarea></div></div></section>
+  const ai = aiProjectStatus[id] || {};
+  const aiControls = `<section><h3>IA Gemini do projeto</h3><p class="muted">A chave fica criptografada no backend. Este painel nunca armazena nem recebe a chave original.</p><div class="row"><span class="tag ${ai.configured ? 'ok' : ''}">${ai.configured ? 'CONFIGURADA' : 'NÃO CONFIGURADA'}</span>${ai.maskedKey ? `<span class="tag">${esc(ai.maskedKey)}</span>` : ''}${ai.lastTestStatus ? `<span class="tag ${ai.lastTestStatus === 'success' ? 'ok' : 'err'}">${ai.lastTestStatus === 'success' ? 'conectada' : 'falha no último teste'}</span>` : ''}<button class="btn ghost" data-act="refreshProjectAI" data-pid="${id}">Atualizar status</button></div>${ad ? `<div class="row" style="margin-top:10px"><label>Modelo <select data-path="p|${id}|aiModel"><option value="" ${!p.aiModel?'selected':''}>Automático (recomendado)</option><option value="gemini-3.5-flash-lite" ${p.aiModel==='gemini-3.5-flash-lite'?'selected':''}>Flash Lite</option><option value="gemini-3.8-flash" ${p.aiModel==='gemini-3.8-flash'?'selected':''}>Flash</option></select></label><input id="ai-key-${id}" class="grow" type="password" placeholder="${ai.configured ? 'Cole uma nova chave para substituir' : 'Cole a chave Gemini do projeto'}"><button class="btn" data-act="saveProjectAI" data-pid="${id}">${ai.configured ? 'Substituir chave' : 'Cadastrar chave'}</button>${ai.configured ? `<button class="btn ghost" data-act="testProjectAI" data-pid="${id}">Testar</button><button class="btn danger" data-act="removeProjectAI" data-pid="${id}">Remover</button>` : ''}</div>` : '<p class="muted">Somente administradores podem gerenciar a chave.</p>'}</section>`;
+  if (projectTab === 'identidade') body = `<section><h3>Identidade do projeto</h3><div class="profile-head"><div class="profile-upload-wrap"><label class="profile-upload" title="${p.logo ? 'Clique para substituir a imagem' : 'Upload Image'}"><img src="${p.logo ? esc(p.logo) : 'vizzion-logo.png'}" alt="Imagem do perfil">${p.logo ? '' : '<span>＋</span><small>Upload Image</small>'}<input type="file" data-act="projectLogo" data-pid="${id}" accept="image/*" ${ad?'':'disabled'}></label>${p.logo && ad ? `<button class="btn ghost" data-act="deleteProjectLogo" data-pid="${id}">Deletar imagem</button>` : ''}</div><div class="grow"><h3>${esc(p.name)}</h3><p class="muted">Imagem redonda como foto de perfil. Clique para trocar; use “Deletar imagem” para removê-la.</p><textarea data-path="p|${id}|bio" data-type="text" placeholder="Bio curta da marca" ${ad?'':'disabled'}>${esc(p.bio||'')}</textarea></div></div></section>${aiControls}
   <section><h3>Ferramentas do projeto</h3><p class="muted">Extensões, páginas e arquivos usados por esta marca.</p><input type="file" data-act="uploadTool" data-pid="${id}" multiple ${ad?'':'disabled'}><div>${(p.tools||[]).map((t,i)=>`<div class="row"><span class="grow">${esc(t.name)} <span class="muted">(${(t.size/1024).toFixed(1)} KB)</span></span><button class="btn ghost" data-act="downloadTool" data-pid="${id}" data-index="${i}">Baixar</button>${ad?`<label class="btn ghost">Substituir<input type="file" hidden data-act="replaceTool" data-pid="${id}" data-index="${i}"></label><button class="x" data-act="deleteTool" data-pid="${id}" data-index="${i}">✕</button>`:''}</div>`).join('')||'<p class="muted">Nenhuma ferramenta enviada.</p>'}</div></section>
   <section><h3>Catálogo do projeto</h3><p class="muted">Importe os produtos diretamente neste projeto. A lista de produtos fica organizada na aba Vitrine.</p><div class="row"><input type="file" data-act="importProducts" data-pid="${id}" accept=".csv,.json" multiple ${ad?'':'disabled'}><button class="btn ghost" data-act="projectTab" data-tab="vitrine">Abrir vitrine (${P.filter(x=>x.projectId===id).length})</button></div></section>`;
   else if (projectTab === 'vitrine') body = viewVitrine(id);
@@ -591,12 +710,14 @@ function viewPublicar() {
   const st = (n) => { const s = pub.status[n]; return s ? `<span class="tag ${s.s === 'ok' ? 'ok' : s.s === 'err' ? 'err' : 'warn'}">${esc(s.m)}</span>` : ''; };
   return `<h2>Publicar</h2><div class="subtabs"><button class="btn" data-act="nav" data-r="publicar">Várias redes</button><button class="btn ghost" data-act="nav" data-r="ofertas">Ofertas em grupos</button></div><p class="sub">Escolha Foto ou Vídeo, selecione as redes e prepare o conteúdo. Com Publicar automaticamente ativado, a extensão tentará clicar no botão final de publicação; confira os resultados de cada rede.</p>
   <section><div class="row"><label>Projeto <select data-pub="projectId">${prj.map((p) => `<option value="${p.id}" ${p.id === pub.projectId ? 'selected' : ''}>${esc(p.name)}</option>`).join('') || '<option value="">(sem projeto)</option>'}</select></label></div>
-  <div class="row"><button class="btn ${pub.mediaType==='video'?'':'ghost'}" data-act="mediaType" data-type="video">Vídeo</button><button class="btn ${pub.mediaType==='photo'&&!pub.productImages?'':'ghost'}" data-act="mediaType" data-type="photo">Foto</button><button class="btn ${pub.productImages?'':'ghost'}" data-act="productImagesMode">Imagem do produto${pub.productImages?' ✓':''}</button><input type="file" data-act="pickFile" accept="${pub.mediaType==='photo'?'image/*':'video/*'}"><span class="muted">${pub.productImages ? 'Fotos dos produtos mencionados no texto serão anexadas automaticamente.' : pub.file ? esc(pub.file.name) + ' (' + (pub.file.size / 1048576).toFixed(1) + ' MB)' : 'Nenhum arquivo escolhido'}</span></div>
+  <div class="row"><button class="btn ${pub.mediaType==='video'?'':'ghost'}" data-act="mediaType" data-type="video">Vídeo</button><button class="btn ${pub.mediaType==='photo'&&!pub.productImages?'':'ghost'}" data-act="mediaType" data-type="photo">Foto</button><button class="btn ${pub.productImages?'':'ghost'}" data-act="productImagesMode">Mídias do produto${pub.productImages?' ✓':''}</button><input type="file" data-act="pickFile" accept="${pub.mediaType==='photo'?'image/*':'video/*'}"><span class="muted">${pub.productImages ? 'A primeira foto e o primeiro vídeo de cada produto serão usados conforme a rede.' : pub.file ? esc(pub.file.name) + ' (' + (pub.file.size / 1048576).toFixed(1) + ' MB)' : 'Nenhum arquivo escolhido'}</span></div>
   <label class="row"><input type="checkbox" data-pub="autoPost" ${pub.autoPost?'checked':''}> Publicar automaticamente (tentar clicar em Publicar/Compartilhar em cada rede)</label>
   <input data-pub="title" style="width:100%;margin:6px 0" placeholder="Título (opcional; usado apenas no TikTok)" value="${esc(pub.title)}">
   <textarea data-pub="text" placeholder="Corpo do post: legenda, hashtags, link…" style="min-height:130px">${esc(pub.text)}</textarea>
-  <div class="row"><div class="grow product-search-wrap"><input id="pub-product-search" class="grow" autocomplete="off" placeholder="Gerar texto a partir de um produto: digite o nome…" value="${esc(pub.productId ? (P.find(p=>p.id===pub.productId)?.title||'') : '')}"><div id="pub-product-results" class="live-results"></div></div><button class="btn ghost" data-act="genPostText">Sugerir texto com IA</button></div>
-  <div class="row">${POST_NETS.filter(n => (pub.productImages || pub.mediaType === 'photo') ? n !== 'youtube' : true).map((n) => `<button type="button" class="social-toggle ${pub.nets[n] ? 'selected' : ''} net-${n}" data-act="pubNetButton" data-net="${n}" aria-pressed="${!!pub.nets[n]}" title="${NETS[n].name}"><span>${({instagram:'◎',facebook:'f',tiktok:'♪',youtube:'▶',linkedin:'in',x:'𝕏'})[n] || NETS[n].name.slice(0,2)}</span><small>${NETS[n].name}</small></button>`).join('')}<div class="network-status">${POST_NETS.filter(n=>pub.nets[n]).map(n=>`<span class="tag">${NETS[n].name}</span>`).join(' ')} ${POST_NETS.map(st).join(' ')}</div></div>
+  <div class="row"><div class="grow product-search-wrap"><input id="pub-product-search" class="grow" autocomplete="off" placeholder="Gerar texto a partir de produtos: digite o nome…" value=""><div id="pub-product-results" class="live-results"></div></div><button class="btn ghost" data-act="genPostText" ${pub.productIds?.length || pub.productId ? '' : 'disabled'}>Sugerir texto com IA</button></div>
+  <div id="selected-publish-products">${renderSelectedPublishProducts()}</div>
+  <div class="row">${POST_NETS.filter(n => pub.productImages || pub.mediaType !== 'photo' || n !== 'youtube').map((n) => n === 'facebook' ? `<div class="facebook-publish-choice"><div class="facebook-publish-title"><span>f</span><b>Facebook</b></div><label><input type="checkbox" data-act="pubFacebookDestination" data-destination="feed" ${pub.facebookDestinations.feed?'checked':''}> Feed</label><label><input type="checkbox" data-act="pubFacebookDestination" data-destination="marketplace" ${pub.facebookDestinations.marketplace?'checked':''}> Marketplace</label></div>` : `<button type="button" class="social-toggle ${pub.nets[n] ? 'selected' : ''} net-${n}" data-act="pubNetButton" data-net="${n}" aria-pressed="${!!pub.nets[n]}" title="${NETS[n].name}"><span>${({instagram:'◎',tiktok:'♪',youtube:'▶',linkedin:'in',x:'𝕏'})[n] || NETS[n].name.slice(0,2)}</span><small>${NETS[n].name}</small></button>`).join('')}<div class="network-status">${pub.facebookDestinations.feed?'<span class="tag">Facebook · Feed</span>':''}${pub.facebookDestinations.marketplace?'<span class="tag">Facebook · Marketplace</span>':''} ${POST_NETS.filter(n=>n!=='facebook'&&pub.nets[n]).map(n=>`<span class="tag">${NETS[n].name}</span>`).join(' ')} ${POST_NETS.map(st).join(' ')}</div></div>
+  ${pub.facebookDestinations.marketplace ? `<section><h3>Facebook Marketplace</h3><div class="row"><label>Localização <input data-pub="marketplaceLocation" value="${esc(pub.marketplaceLocation)}"></label><label>Grupos <input data-pub="marketplaceGroups" type="number" min="0" max="10" value="${pub.marketplaceGroups}"></label><label><input data-pub="marketplaceDelivery" type="checkbox" ${pub.marketplaceDelivery?'checked':''}> Entrega disponível</label></div><p class="muted">O anúncio será preenchido com o primeiro produto selecionado/encontrado, condição Novo e descrição sem links de afiliado.</p></section>` : ''}
   <section class="schedule-box"><h3>Quando publicar?</h3><label class="row"><input type="checkbox" data-pub="postNow" ${pub.postNow?'checked':''}> Postar agora</label><div class="row"><label>Data <input type="date" data-pub="scheduleDate" value="${esc(pub.scheduleDate || today())}" min="${today()}" ${pub.postNow?'disabled':''}></label><label>Horário <input type="time" data-pub="scheduleTime" value="${esc(pub.scheduleTime || '12:00')}" ${pub.postNow?'disabled':''}></label></div><p class="muted">Desmarque “Postar agora” para salvar a mídia, os textos e as redes selecionadas na fila. No horário, a Vizzion chamará o mesmo fluxo de publicação existente.</p></section>
   <div class="row"><button class="btn" data-act="submitPublish">${pub.postNow ? (pub.autoPost?'Publicar automaticamente agora':'Preparar nas abas agora') : 'Agendar publicação'}</button>${Object.keys(pub.status).length ? '<button class="btn ghost" data-act="markPublished">Já publiquei (conta como 1 post)</button>' : ''}</div></section>
   <section><h3>Fila de publicações</h3>${(S.scheduledPosts||[]).slice().sort((a,b)=>a.runAt-b.runAt).map((q)=>`<div class="social-card"><div class="grow"><b>${esc(q.title || (q.mediaType==='photo'?'Publicação com foto':'Publicação com vídeo'))}</b><div class="muted">${new Date(q.runAt).toLocaleString('pt-BR')} · ${(q.nets||[]).map(n=>NETS[n]?.name||n).join(', ')}</div><span class="tag ${q.status==='erro'?'err':q.status==='executando'?'warn':q.status==='concluida'?'ok':''}">${esc(q.status || 'agendada')}${q.error ? ': '+esc(q.error) : ''}</span></div>${q.status==='agendada'?`<button class="btn ghost" data-act="cancelScheduled" data-id="${q.id}">Cancelar</button>`:''}</div>`).join('') || '<p class="muted">Nenhuma publicação agendada.</p>'}</section>
@@ -605,7 +726,7 @@ function viewPublicar() {
 
 const projOptions = (sel) => myProjects().map((p) => `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)}</option>`).join('') || '<option value="">(sem projeto)</option>';
 function viewAtendimento() {
-  if (!att.projectId && myProjects()[0]) att.projectId = myProjects()[0].id;
+  ensureAttProject();
   return `<h2>Atendimento automático</h2>
   <p class="sub">Escolha o projeto e a rede. Ao ligar, a Vizzion monitora conversas novas, organiza os atendimentos em fila e responde automaticamente com a IA usando o contexto e o catálogo do projeto. Não usa captura de tela.</p>
   <section><div class="row">
@@ -650,8 +771,28 @@ function viewCatalogo() {
   const pid = route.startsWith('catalogo:') ? route.slice(9) : catProjectId;
   const items = pid ? P.filter(p => p.projectId === pid) : P;
   return `<h2>Abrir catálogo</h2><p class="sub">${items.length} produto(s) disponíveis. Digite para encontrar produtos pelo início do nome; os resultados são limitados aos primeiros 100 correspondentes.</p><section><label>Projeto <select id="cat-project" data-cat-project="1"><option value="" ${!pid?'selected':''}>Catálogo geral</option>${S.projects.map(p=>`<option value="${p.id}" ${pid===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select></label></section>
-  <section><h3>Importar e baixar</h3><p class="muted">CSV/JSON com colunas id, nome, preco, preco_anterior, categoria, imagem url e url.</p><div class="row"><input type="file" data-act="importProducts" accept=".json,.csv" multiple><button class="btn" data-act="syncCatalog">Sincronizar catálogo completo</button><button class="btn ghost" data-act="downloadCatalog" data-pid="${pid||''}">Baixar dados (${items.length})</button><button class="btn ghost" data-act="downloadOriginalCatalog">Baixar planilha original da nuvem</button><button class="btn danger" data-act="clearProducts">Limpar catálogo</button></div></section>
+  <section><h3>Importar e baixar</h3><p class="muted">CSV/JSON com colunas id, nome, preco, preco_anterior, categoria, imagem url e url.</p><div class="row"><input type="file" data-act="importProducts" accept=".json,.csv" multiple ${isAdmin() && pid ? '' : 'disabled'}><button class="btn" data-act="syncCatalog">Sincronizar catálogo completo</button><button class="btn ghost" data-act="downloadCatalog" data-pid="${pid||''}">Baixar dados (${items.length})</button><button class="btn ghost" data-act="downloadOriginalCatalog">Baixar planilha original da nuvem</button><button class="btn danger" data-act="clearProducts">Limpar catálogo</button></div>${!isAdmin() ? '<p class="muted">MEMBERs podem consultar o catálogo, mas não importar planilhas.</p>' : !pid ? '<p class="muted">Selecione um projeto antes de importar uma planilha.</p>' : ''}</section>
   <section><h3>Buscar produto</h3><input id="cat-q" class="grow" autocomplete="off" placeholder="Comece a digitar o nome do produto…"><p class="muted">Nenhum produto é exibido antes de pesquisar.</p><div id="cat-res"></div></section>`;
+}
+function viewMarketplaceVitrineDialog() {
+  if (!marketplaceVitrineDialog.open) return '';
+  const product = P.find(p => String(p.id) === String(marketplaceVitrineDialog.productId));
+  if (!product) return '';
+  return `<div style="position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:20px"><section style="width:min(520px,100%);margin:0;background:var(--panel,#fff);box-shadow:0 12px 40px rgba(0,0,0,.3)"><div class="row"><h3 class="grow">Publicar no Marketplace</h3><button class="x" data-act="closeMarketplaceVitrine">×</button></div><p class="muted">Produto: <b>${esc(product.title)}</b>. A imagem principal e o texto gerado pela IA serão usados no anúncio.</p><label class="row">Cidade <input class="grow" data-mkt="marketplaceLocation" value="${esc(marketplaceVitrineDialog.marketplaceLocation)}" placeholder="Cidade - Estado" ${marketplaceVitrineDialog.busy?'disabled':''}></label><label class="row"><input type="checkbox" data-mkt="postNow" ${marketplaceVitrineDialog.postNow?'checked':''} ${marketplaceVitrineDialog.busy?'disabled':''}> Publicar agora</label><div class="row"><label>Dia <input type="date" data-mkt="scheduleDate" value="${esc(marketplaceVitrineDialog.scheduleDate)}" min="${today()}" ${marketplaceVitrineDialog.postNow||marketplaceVitrineDialog.busy?'disabled':''}></label><label>Horário <input type="time" data-mkt="scheduleTime" value="${esc(marketplaceVitrineDialog.scheduleTime)}" ${marketplaceVitrineDialog.postNow||marketplaceVitrineDialog.busy?'disabled':''}></label></div><div class="row"><button class="btn ghost" data-act="closeMarketplaceVitrine" ${marketplaceVitrineDialog.busy?'disabled':''}>Cancelar</button><button class="btn" data-act="confirmMarketplaceVitrine" ${marketplaceVitrineDialog.busy?'disabled':''}>${marketplaceVitrineDialog.busy?'Preparando…':marketplaceVitrineDialog.postNow?'Publicar agora':'Agendar publicação'}</button></div></section></div>`;
+}
+function decorateVitrineMarketplaceButtons() {
+  document.querySelectorAll('#vitrine-results .vitrine-card').forEach((card) => {
+    if (card.querySelector('[data-act="openMarketplaceVitrine"]')) return;
+    const source = card.querySelector('[data-act="copyOffer"]');
+    const row = source?.parentElement;
+    if (!source || !row) return;
+    const button = document.createElement('button');
+    button.className = 'btn';
+    button.dataset.act = 'openMarketplaceVitrine';
+    button.dataset.id = source.dataset.id || '';
+    button.textContent = 'Publicar no Marketplace';
+    row.insertBefore(button, row.children[1] || null);
+  });
 }
 function viewVitrine(pid) {
   const items = P.filter(p => p.projectId === pid);
@@ -661,49 +802,120 @@ function viewVitrine(pid) {
   const max = window.__vizzionVitrineMax || '';
   const cat = window.__vizzionVitrineCategory || '';
   const sort = window.__vizzionVitrineSort || '';
-  const filtered = items.filter(p => (!q || strip(p.title).includes(strip(q))) && (!cat || p.category===cat) && (min==='' || Number(p.price)>=Number(min)) && (max==='' || Number(p.price)<=Number(max))).sort((a,b) => sort === 'desc' ? pct(b)-pct(a) : sort === 'asc' ? pct(a)-pct(b) : 0);
+  const filtered = items.filter(p => (!q || strip(p.title).includes(strip(q))) && (!cat || p.category===cat) && (min==='' || Number(p.price)>=Number(min)) && (max==='' || Number(p.price)<=Number(max))).sort((a,b) => {
+    if (sort === 'priceAsc' || sort === 'priceDesc') {
+      const ap = Number.isFinite(Number(a.price)) ? Number(a.price) : null;
+      const bp = Number.isFinite(Number(b.price)) ? Number(b.price) : null;
+      if (ap === null && bp === null) return 0;
+      if (ap === null) return 1;
+      if (bp === null) return -1;
+      return sort === 'priceAsc' ? ap - bp : bp - ap;
+    }
+    return sort === 'desc' ? pct(b)-pct(a) : sort === 'asc' ? pct(a)-pct(b) : 0;
+  });
   const pageCount = Math.max(1, Math.ceil(filtered.length/50)); vitrinePage = Math.min(vitrinePage, pageCount-1);
   const shown = filtered.slice(vitrinePage*50, vitrinePage*50+50);
-  return `<section><div class="row"><h3 class="grow">Vitrine de produtos</h3><span class="tag">${filtered.length} produto(s)</span></div><p class="muted">Exibindo até 50 cards por página, com filtros combináveis.</p><div class="vitrine-filters"><label>Buscar nome<input id="vitrine-q" value="${esc(q)}" placeholder="Nome do produto"></label><label>Categoria<select id="vitrine-category"><option value="">Todas as categorias</option>${cats.map(c=>`<option value="${esc(c)}" ${cat===c?'selected':''}>${esc(c)}</option>`).join('')}</select></label><label>Preço mínimo (R$)<input id="vitrine-min" type="number" min="0" step="0.01" value="${esc(min)}" placeholder="0,00"></label><label>Preço máximo (R$)<input id="vitrine-max" type="number" min="0" step="0.01" value="${esc(max)}" placeholder="Sem limite"></label><label>Ordenar por desconto<select id="vitrine-sort"><option value="" ${sort===''?'selected':''}>Ordem do catálogo</option><option value="desc" ${sort==='desc'?'selected':''}>Maior desconto primeiro</option><option value="asc" ${sort==='asc'?'selected':''}>Menor desconto primeiro</option></select></label></div><div id="vitrine-results" class="vitrine-grid">${shown.map(p=>`<article class="vitrine-card">${p.image?`<img src="${esc(p.image)}" alt="${esc(p.title)}" loading="lazy" referrerpolicy="no-referrer">`:'<div class="offer-placeholder">Sem foto</div>'}<div class="vitrine-card-body"><b>${esc(p.title)}</b><div class="vitrine-price">${brl(p.price)} ${p.oldPrice?`<s class="muted">${brl(p.oldPrice)}</s> <span class="tag ok">${pct(p)}% OFF</span>`:''}</div>${p.category?`<span class="tag">${esc(p.category)}</span>`:''}${p.store?`<span class="tag">${esc(p.store)}</span>`:''}<div class="muted">Projeto: ${esc(proj(p.projectId)?.name||'—')}</div><div class="row"><button class="btn" data-act="copyOffer" data-id="${esc(p.id)}">Copiar informações</button><button class="btn danger" data-act="deleteCatalogProduct" data-id="${esc(p.id)}" title="Excluir este produto do catálogo">Excluir do catálogo</button>${p.url?`<button class="btn ghost" data-act="openProduct" data-id="${esc(p.id)}">Abrir oferta</button>`:''}</div></div></article>`).join('')||'<p class="muted">Nenhum produto corresponde aos filtros.</p>'}</div><div id="vitrine-pagination" class="row vitrine-pagination"><span class="grow muted">Página ${vitrinePage+1} de ${pageCount}</span><button class="btn ghost" data-act="vitrinePage" data-page="-1" ${vitrinePage===0?'disabled':''}>Anterior</button><button class="btn ghost" data-act="vitrinePage" data-page="1" ${vitrinePage>=pageCount-1?'disabled':''}>Próxima</button></div></section>`;
+  return `<section><div class="row"><h3 class="grow">Vitrine de produtos</h3><span class="tag">${filtered.length} produto(s)</span></div><p class="muted">Exibindo até 50 cards por página, com filtros combináveis.</p><div class="vitrine-filters"><label>Buscar nome<input id="vitrine-q" value="${esc(q)}" placeholder="Nome do produto"></label><label>Categoria<select id="vitrine-category"><option value="">Todas as categorias</option>${cats.map(c=>`<option value="${esc(c)}" ${cat===c?'selected':''}>${esc(c)}</option>`).join('')}</select></label><label>Preço mínimo (R$)<input id="vitrine-min" type="number" min="0" step="0.01" value="${esc(min)}" placeholder="0,00"></label><label>Preço máximo (R$)<input id="vitrine-max" type="number" min="0" step="0.01" value="${esc(max)}" placeholder="Sem limite"></label>  <label>Ordenar por<select id="vitrine-sort"><option value="" ${sort===''?'selected':''}>Ordem do catálogo</option><option value="priceAsc" ${sort==='priceAsc'?'selected':''}>Menor preço primeiro</option><option value="priceDesc" ${sort==='priceDesc'?'selected':''}>Maior preço primeiro</option><option value="desc" ${sort==='desc'?'selected':''}>Maior desconto primeiro</option><option value="asc" ${sort==='asc'?'selected':''}>Menor desconto primeiro</option></select></label></div><div id="vitrine-results" class="vitrine-grid">${shown.map(p=>`<article class="vitrine-card">${p.image?`<img src="${esc(p.image)}" alt="${esc(p.title)}" loading="lazy" referrerpolicy="no-referrer">`:'<div class="offer-placeholder">Sem foto</div>'}<div class="vitrine-card-body"><b>${esc(p.title)}</b><div class="vitrine-price">${brl(p.price)} ${p.oldPrice?`<s class="muted">${brl(p.oldPrice)}</s> <span class="tag ok">${pct(p)}% OFF</span>`:''}</div>${p.category?`<span class="tag">${esc(p.category)}</span>`:''}${p.store?`<span class="tag">${esc(p.store)}</span>`:''}<div class="muted">Projeto: ${esc(proj(p.projectId)?.name||'—')}</div><div class="row"><button class="btn" data-act="copyOffer" data-id="${esc(p.id)}">Copiar informações</button><button class="btn danger" data-act="deleteCatalogProduct" data-id="${esc(p.id)}" title="Excluir este produto do catálogo">Excluir do catálogo</button>${p.url?`<button class="btn ghost" data-act="openProduct" data-id="${esc(p.id)}">Abrir oferta</button>`:''}</div></div></article>`).join('')||'<p class="muted">Nenhum produto corresponde aos filtros.</p>'}</div><div id="vitrine-pagination" class="row vitrine-pagination"><span class="grow muted">Página ${vitrinePage+1} de ${pageCount}</span><button class="btn ghost" data-act="vitrinePage" data-page="-1" ${vitrinePage===0?'disabled':''}>Anterior</button><button class="btn ghost" data-act="vitrinePage" data-page="1" ${vitrinePage>=pageCount-1?'disabled':''}>Próxima</button></div></section>`;
 }
 function renderVitrineResults() {
   if (!route.startsWith('proj:') || projectTab !== 'vitrine') return;
   const root = $('#root'); if (!root) return;
   const id = route.slice(5), items = P.filter(p=>p.projectId===id);
   const q = window.__vizzionVitrineQuery || '', min=window.__vizzionVitrineMin||'', max=window.__vizzionVitrineMax||'', cat=window.__vizzionVitrineCategory||'', sort=window.__vizzionVitrineSort||'';
-  const filtered=items.filter(p=>(!q||strip(p.title).includes(strip(q)))&&(!cat||p.category===cat)&&(min===''||Number(p.price)>=Number(min))&&(max===''||Number(p.price)<=Number(max))).sort((a,b)=>sort==='desc'?pct(b)-pct(a):sort==='asc'?pct(a)-pct(b):0);
+  const filtered=items.filter(p=>(!q||strip(p.title).includes(strip(q)))&&(!cat||p.category===cat)&&(min===''||Number(p.price)>=Number(min))&&(max===''||Number(p.price)<=Number(max))).sort((a,b)=>{
+    if(sort==='priceAsc'||sort==='priceDesc'){
+      const ap=Number.isFinite(Number(a.price))?Number(a.price):null,bp=Number.isFinite(Number(b.price))?Number(b.price):null;
+      if(ap===null&&bp===null)return 0;
+      if(ap===null)return 1;
+      if(bp===null)return -1;
+      return sort==='priceAsc'?ap-bp:bp-ap;
+    }
+    return sort==='desc'?pct(b)-pct(a):sort==='asc'?pct(a)-pct(b):0;
+  });
   const pageCount=Math.max(1,Math.ceil(filtered.length/50)); vitrinePage=Math.max(0,Math.min(vitrinePage,pageCount-1));
   const cards=filtered.slice(vitrinePage*50,vitrinePage*50+50);
   const results=$('#vitrine-results'); if(results) results.innerHTML=cards.map(p=>`<article class="vitrine-card">${p.image?`<img src="${esc(p.image)}" alt="${esc(p.title)}" loading="lazy" referrerpolicy="no-referrer">`:'<div class="offer-placeholder">Sem foto</div>'}<div class="vitrine-card-body"><b>${esc(p.title)}</b><div class="vitrine-price">${brl(p.price)} ${p.oldPrice?`<s class="muted">${brl(p.oldPrice)}</s> <span class="tag ok">${pct(p)}% OFF</span>`:''}</div>${p.category?`<span class="tag">${esc(p.category)}</span>`:''}${p.store?`<span class="tag">${esc(p.store)}</span>`:''}<div class="muted">Projeto: ${esc(proj(p.projectId)?.name||'—')}</div><div class="row"><button class="btn" data-act="copyOffer" data-id="${esc(p.id)}">Copiar informações</button><button class="btn danger" data-act="deleteCatalogProduct" data-id="${esc(p.id)}" title="Excluir este produto do catálogo">Excluir do catálogo</button>${p.url?`<button class="btn ghost" data-act="openProduct" data-id="${esc(p.id)}">Abrir oferta</button>`:''}</div></div></article>`).join('')||'<p class="muted">Nenhum produto corresponde aos filtros.</p>';
   const pag=$('#vitrine-pagination'); if(pag) pag.innerHTML=`<span class="grow muted">${filtered.length} produto(s) · Página ${vitrinePage+1} de ${pageCount}</span><button class="btn ghost" data-act="vitrinePage" data-page="-1" ${vitrinePage===0?'disabled':''}>Anterior</button><button class="btn ghost" data-act="vitrinePage" data-page="1" ${vitrinePage>=pageCount-1?'disabled':''}>Próxima</button>`;
+  decorateVitrineMarketplaceButtons();
 }
 function renderPubProductResults() {
   const input=$('#pub-product-search'), box=$('#pub-product-results'); if(!input||!box) return;
   const q=strip(input.value.trim());
   if(!q){box.innerHTML='';return;}
-  const found=P.filter(p=>strip(p.title||'').includes(q)).slice(0,30);
-  box.innerHTML=found.map(p=>`<button type="button" class="live-result" data-act="selectPubProduct" data-id="${esc(p.id)}"><span>${esc(p.title)}</span><small>${brl(p.price)}${p.projectId&&proj(p.projectId)?' · '+esc(proj(p.projectId).name):''}</small></button>`).join('')||'<div class="muted live-empty">Nenhum produto encontrado.</div>';
+  const found=P.filter(p=>(!pub.projectId || !p.projectId || p.projectId===pub.projectId) && strip(p.title||'').includes(q)).slice(0,50);
+  const selected = new Set(pub.productIds?.length ? pub.productIds : (pub.productId ? [pub.productId] : []));
+  box.innerHTML=found.map(p=>`<button type="button" class="live-result ${selected.has(p.id) ? 'selected' : ''}" data-act="selectPubProduct" data-id="${esc(p.id)}"><span>${selected.has(p.id) ? '✓ ' : ''}${esc(p.title)}</span><small>${brl(p.price)}${p.projectId&&proj(p.projectId)?' · '+esc(proj(p.projectId).name):''}</small></button>`).join('')||'<div class="muted live-empty">Nenhum produto encontrado.</div>';
+}
+function renderSelectedPublishProducts() {
+  const ids = pub.productIds?.length ? pub.productIds : (pub.productId ? [pub.productId] : []);
+  if (!ids.length) return '';
+  return `<div class="selected-publish-products"><span class="muted">Produtos selecionados (${ids.length}):</span>${ids.map(id => { const p = P.find(x => x.id === id); return p ? `<button type="button" class="tag" data-act="selectPubProduct" data-id="${esc(p.id)}">${esc(p.title)} ×</button>` : ''; }).join('')}</div>`;
+}
+function refreshPublishProductSelection() {
+  const selected = $('#selected-publish-products');
+  if (selected) selected.innerHTML = renderSelectedPublishProducts();
+  const button = document.querySelector('[data-act="genPostText"]');
+  if (button) button.disabled = !(pub.productIds?.length || pub.productId);
+  renderPubProductResults();
 }
 
 
 function viewConfig() {
-  const s = S.settings;
-  const f = (k, l, t = 'text', ph = '') => `<label class="row"><span style="width:240px">${l}</span><input class="grow" data-path="s|${k}" data-type="${t}" type="${t}" value="${esc(s[k] ?? '')}" placeholder="${ph}"></label>`;
-  return `<h2>Configurações</h2><p class="sub">Tudo é salvo neste navegador. A chave da API fica só aqui.</p>
-  <section><h3>IA · Gemini gratuito</h3><p class="muted">Use uma chave do Google AI Studio. Não precisa de Claude. Confira limites e disponibilidade do nível gratuito no Google AI Studio.</p><label class="row"><span style="width:240px">Provedor</span><select data-path="s|provider"><option value="gemini" ${s.provider !== 'anthropic'?'selected':''}>Google Gemini</option><option value="anthropic" ${s.provider === 'anthropic'?'selected':''}>Anthropic Claude</option></select></label>${f('apiKey', 'Chave da API', 'password', 'Cole sua chave')}${f('model', 'Modelo', 'text', 'gemini-3.5-flash-lite')}${f('apiUrl', 'URL personalizada (opcional)', 'text', 'deixe vazio para usar o padrão')}<div class="row"><button class="btn ghost" data-act="testAI">Testar conexão com a IA</button></div></section>
+  const f = (k, l, t = 'text', ph = '') => `<label class="row"><span style="width:240px">${l}</span><input class="grow" data-path="s|${k}" data-type="${t}" type="${t}" value="${esc(S.settings[k] ?? '')}" placeholder="${ph}"></label>`;
+  return `<h2>Configurações</h2><p class="sub">As chaves Gemini são configuradas dentro de cada projeto e nunca ficam salvas neste navegador.</p>
   <section><h3>Bot e tasks</h3>${f('autoMaxPerHour', 'Limite de respostas automáticas por hora', 'number')}${f('botPhotosMax', 'Fotos de produtos por resposta automática (0 = não enviar)', 'number')}${f('stagesPerDay', 'Etapas por projeto nas tasks do dia', 'number')}</section>
   <section><h3>Catálogo no banco de dados</h3><p class="muted">Apaga todos os produtos da tabela compartilhada no backend e limpa o catálogo deste navegador. Use quando quiser começar do zero após importar planilhas antigas. Essa ação não pode ser desfeita; exporte um backup antes.</p><button class="btn danger" data-act="clearAllCatalogDatabase">Excluir todos os catálogos do banco de dados</button></section>
+  <section><h3>Conector MCP</h3><p class="muted">Conecte um servidor MCP local ou remoto para compartilhar contexto e ferramentas com uma IA compatível. O token fica somente neste navegador.</p><div class="grid2">${f('mcpUrl', 'URL do servidor MCP', 'url', 'http://127.0.0.1:8787')}<label class="row"><span style="width:240px">Token MCP</span><input class="grow" data-path="s|mcpToken" type="password" value="${esc(S.settings.mcpToken || '')}" placeholder="Bearer token do servidor"></label></div><textarea id="mcp-context-text" placeholder="Texto de teste para enviar ao MCP" style="min-height:90px"></textarea><div class="row"><button class="btn ghost" data-act="grantMcp">Autorizar conexão</button><button class="btn ghost" data-act="testMcp">Testar conexão</button><button class="btn" data-act="sendMcpContext">Enviar contexto</button></div></section>
   <section><h3>Equipe e sincronização</h3><p class="muted">Conexão com o backend Vizzion configurada automaticamente.</p><div class="row"><button class="btn ghost" data-act="pull">Baixar da equipe</button><button class="btn ghost" data-act="push">Enviar para a equipe</button><button class="btn ghost" data-act="logout">Sair da conta</button></div></section>
   <section><h3>Backup</h3><div class="row"><button class="btn ghost" data-act="export">Exportar dados (JSON)</button><input type="file" data-act="import" accept=".json"></div></section>`;
+}
+
+function viewChat() {
+  const channel = S.chat.channels.find((c) => c.id === routeChat) || S.chat.channels[0];
+  const isIA = channel?.type === 'ia';
+  const msgs = S.chat.messages.filter((m) => m.channelId === (channel?.id || 'geral')).slice(-100);
+  const meName = me?.name || me?.email || 'Você';
+  return `<div class="chat-view">
+    <div class="chat-sidebar">
+      <h3>Canais</h3>
+      ${S.chat.channels.map((c) => {
+        const active = c.id === (routeChat || 'geral');
+        return `<a class="chat-channel ${active ? 'on' : ''}" data-act="chatChannel" data-cid="${esc(c.id)}"><span class="dot"></span><span class="name">${esc(c.name)}</span>${c.type === 'ia' ? '<span class="ia-tag">IA</span>' : ''}</a>`;
+      }).join('')}
+      <div class="chat-new" data-act="chatNewChannel">+ Novo canal</div>
+    </div>
+    <div class="chat-main">
+      <div class="chat-header">
+        <h2>${esc(channel?.name || 'Geral')}${isIA ? ' <span class="ia-tag">IA · Migoo</span>' : ''}</h2>
+        <p>${isIA ? 'Converse com a IA via servidor MCP configurado em Configurações.' : 'Mensagens compartilhadas com a equipe.'}</p>
+      </div>
+      <div class="chat-messages" id="chat-msgs">
+        ${msgs.length ? msgs.map((m) => {
+          const isMe = m.authorId === me?.id;
+          const ai = m.ai ? ' <span class="ia-tag">IA</span>' : '';
+          return `<div class="chat-msg ${isMe ? 'me' : ''}"><div class="bubble">${esc(m.text)}${ai}</div><div class="who">${esc(m.authorName || 'Integrante')}${ai}</div><span class="time">${m.createdAt ? new Date(m.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '—'}</span></div>`;
+        }).join('') : '<div class="chat-empty">Nenhuma mensagem ainda.</div>'}
+        <div id="chat-typing" class="chat-typing"></div>
+      </div>
+      <div class="chat-compose">
+        <textarea id="chat-input" class="grow" placeholder="${isIA ? 'Escreva para a IA…' : 'Escreva uma mensagem…'}" rows="1"></textarea>
+        <button class="btn" data-act="chatSend">Enviar</button>
+        ${isIA ? `<button class="btn chat-btn-ia" data-act="chatAskIA">Perguntar à IA</button>` : ''}
+      </div>
+    </div>
+  </div>`;
 }
 
 function render() {
   const y = window.scrollY, root = $('#root');
   if (!AUTH || !me) { root.innerHTML = viewLogin(); return; }
-  const views = { hoje: viewHoje, agencia: viewAgencia, usuarios: viewUsuarios, historico: viewHistorico, biblioteca: viewBiblioteca, ferramentas: viewFerramentas, publicar: viewPublicar, atendimento: viewAtendimento, ofertas: viewOfertas, catalogo: viewCatalogo, config: viewConfig };
+  const views = { hoje: viewHoje, agencia: viewAgencia, usuarios: viewUsuarios, historico: viewHistorico, biblioteca: viewBiblioteca, ferramentas: viewFerramentas, publicar: viewPublicar, atendimento: viewAtendimento, ofertas: viewOfertas, catalogo: viewCatalogo, config: viewConfig, chat: viewChat };
   
+  if (route === 'chat') routeChat = 'geral';
   const v = route.startsWith('proj:') ? viewProjeto(route.slice(5)) : route.startsWith('ferramentas:') ? viewFerramentas() : route.startsWith('catalogo:') ? viewCatalogo() : (views[route] || viewHoje)();
   root.innerHTML = sidebar() + `<main>${v}</main>`;
+  decorateVitrineMarketplaceButtons();
+  if (marketplaceVitrineDialog.open) root.insertAdjacentHTML('beforeend', viewMarketplaceVitrineDialog());
   window.scrollTo(0, y);
 }
 
@@ -716,13 +928,28 @@ const fillMsg = async (net, text, send = false, expectedChat = '') => {
   const r = await callNet(net, { type: 'CHAT_FILL', text, send, expectedChat });
   if (!r?.ok) throw new Error(r?.error || 'Falha ao preencher');
 };
-
-async function autoActivateGemini() {
-  S.settings.provider='gemini'; S.settings.model='gemini-3.5-flash-lite';
-  if(!String(S.settings.apiKey||'').trim()) S.settings.apiKey=DEFAULT().settings.apiKey;
-  save(false);
-  try { const result=await ai('Responda apenas com: conexão funcionando.','Ativação automática da IA após login na Vizzion.',20); toast('IA Gemini ativada automaticamente: '+result.slice(0,70)); }
-  catch(e) { console.warn('Gemini auto activation',e); toast('Login concluído, mas a IA não confirmou conexão: '+String(e?.message||e).slice(0,140)); }
+async function mcpJsonRequest(body, sessionId = '') {
+  const url = `${String(S.settings.mcpUrl || '').replace(/\/$/, '')}/mcp`;
+  const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
+  if (S.settings.mcpToken) headers.authorization = `Bearer ${S.settings.mcpToken}`;
+  if (sessionId) headers['mcp-session-id'] = sessionId;
+  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+  const nextSession = response.headers.get('mcp-session-id') || sessionId;
+  const contentType = response.headers.get('content-type') || '';
+  const raw = await response.text();
+  if (!response.ok) throw new Error(`MCP respondeu ${response.status}: ${raw.slice(0, 180)}`);
+  if (contentType.includes('text/event-stream')) {
+    const dataLine = raw.split(/\r?\n/).find(line => line.startsWith('data:'));
+    return { data: dataLine ? JSON.parse(dataLine.slice(5).trim()) : {}, sessionId: nextSession };
+  }
+  return { data: raw ? JSON.parse(raw) : {}, sessionId: nextSession };
+}
+async function mcpCallTool(name, argumentsValue) {
+  const initialized = await mcpJsonRequest({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'vizzion-panel', version: '1.0.0' } } });
+  await mcpJsonRequest({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }, initialized.sessionId);
+  const result = await mcpJsonRequest({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name, arguments: argumentsValue } }, initialized.sessionId);
+  if (result.data.error) throw new Error(result.data.error.message || 'MCP rejeitou a ferramenta.');
+  return result.data.result || result.data;
 }
 
 const actions = {
@@ -733,12 +960,93 @@ const actions = {
     const email = ($('#team-email')?.value || '').trim();
     const password = $('#team-password')?.value || '';
     if (name.length < 2 || !email || password.length < 8) return toast('Preencha nome, e-mail e senha inicial com pelo menos 8 caracteres.');
-    const result = await api('/team', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, email, password }) });
+    const role = isMasterAdmin() ? ($('#team-role')?.value || 'member') : 'member';
+    const result = await api('/team', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, email, password, role }) });
     await refreshTeam();
     render(); toast(result.message || 'Conta criada com sucesso.');
   },
+  async changeTeamRole(el) {
+    if (!isMasterAdmin()) return toast('Somente o MASTERADMIN pode alterar papéis.');
+    const role = el.value;
+    try {
+      await api('/team/role', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: el.dataset.id, role }) });
+      await refreshTeam(); render(); toast('Papel atualizado.');
+    } catch (e) {
+      toast(e.message || 'Não foi possível alterar o papel.');
+      await refreshTeam(); render();
+    }
+  },
   async grantLoginBackend() {
     try { const url = ($('#lg-backend')?.value || '').trim(); if (!url) return toast('Cole primeiro a URL do backend.'); const origin = new URL(url).origin; const ok = await chrome.permissions.request({ origins: [origin + '/*'] }); toast(ok ? 'Conexão permitida. Agora você pode entrar.' : 'Permissão de conexão não concedida.'); } catch { toast('URL inválida. Use a URL HTTPS do backend.'); }
+  },
+  async grantMcp() {
+    try {
+      const url = String(S.settings.mcpUrl || '').trim();
+      if (!url) return toast('Informe a URL do servidor MCP.');
+      const parsed = new URL(url);
+      if (!/^https?:$/.test(parsed.protocol)) return toast('Use uma URL HTTP ou HTTPS para o MCP.');
+      const origin = parsed.origin;
+      const ok = await chrome.permissions.request({ origins: [origin + '/*'] });
+      toast(ok ? 'Conexão MCP autorizada.' : 'Permissão MCP não concedida.');
+    } catch (error) { toast(`Não foi possível autorizar o MCP: ${error.message || error}`); }
+  },
+  async testMcp() {
+    try {
+      const url = String(S.settings.mcpUrl || '').replace(/\/$/, '');
+      if (!url) return toast('Informe a URL do servidor MCP.');
+      const response = await fetch(`${url}/health`, { headers: S.settings.mcpToken ? { authorization: `Bearer ${S.settings.mcpToken}` } : {} });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) throw new Error(result.error || `Servidor respondeu ${response.status}.`);
+      toast(`MCP conectado: ${result.service || 'servidor respondeu corretamente'}.`);
+    } catch (error) { toast(`MCP indisponível: ${error.message || error}`); }
+  },
+  async sendMcpContext() {
+    const text = String($('#mcp-context-text')?.value || '').trim();
+    if (!text) return toast('Digite um texto para enviar ao MCP.');
+    try {
+      const result = await mcpCallTool('receber_texto', { text });
+      const message = result.content?.find(item => item.type === 'text')?.text || 'Contexto enviado ao MCP.';
+      toast(message);
+    } catch (error) { toast(`Falha ao enviar contexto: ${error.message || error}`); }
+  },
+  chatChannel(el) { routeChat = el.dataset.cid; render(); },
+  async chatNewChannel() {
+    const name = prompt('Nome do novo canal:', 'Canal'); if (!name || !name.trim()) return;
+    S.chat.channels.push({ id: 'ch-' + uid(), name: name.trim() });
+    save(); render(); toast('Canal criado.');
+  },
+  async chatSend() {
+    const input = $('#chat-input'); const text = String(input?.value || '').trim();
+    if (!text) return;
+    const channelId = routeChat || 'geral';
+    const channel = S.chat.channels.find((c) => c.id === channelId);
+    const now = new Date().toISOString();
+    S.chat.messages.push({ id: 'msg-' + uid(), channelId, authorId: me?.id, authorName: me?.name || me?.email || 'Você', text, createdAt: now });
+    input.value = ''; save(); render();
+    const el = $('#chat-msgs'); if (el) el.scrollTop = el.scrollHeight;
+  },
+  async chatAskIA() {
+    const input = $('#chat-input'); const text = String(input?.value || '').trim();
+    if (!text) return toast('Digite uma mensagem para a IA.');
+    const channelId = routeChat || 'geral';
+    const now = new Date().toISOString();
+    S.chat.messages.push({ id: 'msg-' + uid(), channelId, authorId: me?.id, authorName: me?.name || me?.email || 'Você', text, createdAt: now });
+    S.chat.messages.push({ id: 'msg-' + uid(), channelId, authorId: 'ia', authorName: 'IA · Migoo', text: '…', createdAt: now, ai: true, typing: true });
+    input.value = ''; save(); render();
+    const el = $('#chat-msgs'); if (el) el.scrollTop = el.scrollHeight;
+    try {
+      const result = await mcpCallTool('responder_mensagem', { mensagem: text, canal: channelId });
+      const resposta = result.content?.find(item => item.type === 'text')?.text || 'A IA não retornou uma resposta.';
+      const idx = S.chat.messages.findIndex(m => m.ai && m.typing && m.channelId === channelId);
+      if (idx >= 0) { S.chat.messages[idx].text = resposta; delete S.chat.messages[idx].typing; }
+      else { S.chat.messages.push({ id: 'msg-' + uid(), channelId, authorId: 'ia', authorName: 'IA · Migoo', text: resposta, createdAt: new Date().toISOString(), ai: true }); }
+      save(); render();
+      const el2 = $('#chat-msgs'); if (el2) el2.scrollTop = el2.scrollHeight;
+    } catch (e) {
+      const idx = S.chat.messages.findIndex(m => m.ai && m.typing && m.channelId === channelId);
+      if (idx >= 0) { S.chat.messages[idx].text = 'Erro: ' + (e.message || 'IA não respondeu'); delete S.chat.messages[idx].typing; }
+      save(); render(); toast('Falha ao consultar a IA: ' + (e.message || e));
+    }
   },
   async login() {
     const backend = DEFAULT_BACKEND_URL;
@@ -754,6 +1062,7 @@ const actions = {
       response = await r.json();
       if (!r.ok || !response.session?.access_token) throw new Error(response.error || 'Não foi possível entrar. Confira e-mail e senha.');
     } catch (e) { return toast(e.message || 'Falha de conexão com o backend.'); }
+    att.projectId = '';
     AUTH = response.session; me = response.profile;
     await chrome.storage.local.set({ cc_auth: AUTH, cc_profile: me });
     try {
@@ -765,9 +1074,8 @@ const actions = {
     } catch (e) { console.warn('initial sync', e); }
     if (S.lastGen !== today()) generateTasks();
     render();
-    await autoActivateGemini();
   },
-  async logout() { me = null; AUTH = null; await chrome.storage.local.remove(['cc_auth', 'cc_profile', 'cc_session']); render(); },
+  async logout() { att.projectId = ''; me = null; AUTH = null; await chrome.storage.local.remove(['cc_auth', 'cc_profile', 'cc_session']); render(); },
   nav(el) { route = el.dataset.r; projectTab = 'identidade'; render(); if (route === 'historico') loadActivity(); },
   async refreshNotificationCounts() { await refreshNotificationCounts(false); },
   projectTab(el) { projectTab = el.dataset.tab; render(); },
@@ -784,9 +1092,49 @@ const actions = {
     }
     save(); audit(el.checked ? 'task.completed' : 'task.reopened', 'task', t.id, { title: t.title }); render();
   },
+  sendGeneralMessage() {
+    const input = $('#general-message-input');
+    const text = String(input?.value || '').trim();
+    if (!text) return toast('Escreva um recado antes de enviar.');
+    S.general.messages = Array.isArray(S.general.messages) ? S.general.messages : [];
+    S.general.messages.push({ id: uid(), text, authorId: me?.id || '', authorName: me?.name || me?.email || 'Integrante', createdAt: Date.now() });
+    S.general.messages = S.general.messages.slice(-100);
+    save();
+    render();
+  },
   genTasks() { const n = generateTasks(); if (n) audit('tasks.generated', 'task', '', { title: `${n} tarefas geradas`, count: n }); toast(n ? `${n} task(s) criada(s).` : 'As tasks de hoje já estavam geradas.'); render(); },
 
   async projectLogo(el) { if (!isAdmin()) return toast('Somente admins podem alterar a identidade.'); const f = el.files?.[0], p = proj(el.dataset.pid); if (!f || !p) return; if (!f.type.startsWith('image/')) return toast('Escolha uma imagem.'); if (f.size > 2*1024*1024) return toast('Logo deve ter até 2 MB.'); p.logo = await new Promise((resolve,reject)=>{ const r=new FileReader(); r.onload=()=>resolve(r.result); r.onerror=reject; r.readAsDataURL(f); }); save(); render(); },
+  async refreshProjectAI(el) {
+    try { aiProjectStatus[el.dataset.pid] = await api(`/projects/${encodeURIComponent(el.dataset.pid)}/ai-key`); render(); }
+    catch (e) { toast(e.message || 'Não foi possível consultar a IA do projeto.'); }
+  },
+  async saveProjectAI(el) {
+    if (!isAdmin()) return toast('Somente admins podem gerenciar a chave do projeto.');
+    const input = document.getElementById(`ai-key-${el.dataset.pid}`);
+    const apiKey = input?.value?.trim() || '';
+    if (!apiKey) return toast('Informe a chave Gemini.');
+    try {
+      aiProjectStatus[el.dataset.pid] = await api(`/projects/${encodeURIComponent(el.dataset.pid)}/ai-key`, { method: 'PUT', body: JSON.stringify({ apiKey }) });
+      if (input) input.value = '';
+      render(); toast('Chave Gemini protegida e salva no projeto.');
+    } catch (e) { toast(e.message || 'Não foi possível salvar a chave Gemini.'); }
+  },
+  async testProjectAI(el) {
+    try {
+      await api(`/projects/${encodeURIComponent(el.dataset.pid)}/ai-key`, { method: 'POST', body: JSON.stringify({ model: proj(el.dataset.pid)?.aiModel || '' }) });
+      aiProjectStatus[el.dataset.pid] = await api(`/projects/${encodeURIComponent(el.dataset.pid)}/ai-key`);
+      render(); toast('Conexão Gemini confirmada.');
+    } catch (e) { toast(e.message || 'Não foi possível testar a conexão Gemini.'); }
+  },
+  async removeProjectAI(el) {
+    if (!isAdmin() || !confirm('Remover a chave Gemini deste projeto?')) return;
+    try {
+      await api(`/projects/${encodeURIComponent(el.dataset.pid)}/ai-key`, { method: 'DELETE' });
+      aiProjectStatus[el.dataset.pid] = { configured: false };
+      render(); toast('Chave Gemini removida.');
+    } catch (e) { toast(e.message || 'Não foi possível remover a chave Gemini.'); }
+  },
   catProject(el) { catProjectId = el.value; route = 'catalogo'; render(); },
   async uploadTool(el) { if (!isAdmin()) return toast('Somente admins podem enviar ferramentas.'); const p = proj(el.dataset.pid); if (!p) return; p.tools = p.tools || []; for (const f of [...(el.files||[])]) { if (f.size > 3*1024*1024) { toast(`${f.name}: limite de 3 MB por arquivo.`); continue; } const data = await new Promise(resolve=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>resolve('');r.readAsDataURL(f);}); if(data) p.tools.push({id:uid(),name:f.name,size:f.size,type:f.type,data}); } save(); toast('Ferramentas adicionadas.'); render(); },
   downloadTool(el) { const t=proj(el.dataset.pid)?.tools?.[+el.dataset.index]; if(!t) return; const a=document.createElement('a'); a.href=t.data; a.download=t.name; a.click(); },
@@ -797,7 +1145,7 @@ const actions = {
   async downloadOriginalCatalog() { try { const j=await api('/catalog-file'); if(!j.url) return toast('Ainda não há uma planilha original salva na nuvem. Importe o arquivo original uma vez para guardá-lo.'); const a=document.createElement('a'); a.href=j.url; a.download=j.name||'catalogo-original'; a.target='_blank'; a.rel='noopener'; a.click(); } catch(e) { toast(e.message || 'Não foi possível baixar a planilha original.'); } },
   async deleteTeamMember(el) { const id=el.dataset.id; const name=el.dataset.name||'integrante'; if(!id || id===me?.id) return toast('Não é possível excluir a própria conta por aqui.'); if(!confirm(`Excluir a conta de ${name}? A pessoa perderá acesso à Vizzion. Essa ação não pode ser desfeita.`)) return; await api('/team/delete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id})}); await refreshTeam(); render(); toast(`Conta de ${name} excluída.`); },
   deleteLibraryPost(el) { const id=el.dataset.id; const idx=S.postsLog.findIndex(x=>String(x.id||'')===String(id)); if(idx<0) return toast('Não foi possível identificar este post. Atualize a biblioteca e tente novamente.'); if(!confirm('Excluir esta publicação do histórico da biblioteca?')) return; S.postsLog.splice(idx,1); save(); audit('post.deleted','post',id,{title:'Publicação removida da biblioteca'}); render(); toast('Publicação removida da biblioteca.'); },
-  async submitPublish() { if(pub.postNow) return actions.runPublish(); const nets=POST_NETS.filter(n=>pub.nets[n]); if(!nets.length) return toast('Escolha ao menos uma rede.'); if(!pub.text.trim()&&!pub.file&&!pub.productImages) return toast('Escreva o texto ou escolha um arquivo.'); const date=String(pub.scheduleDate||''),time=String(pub.scheduleTime||''); if(!date||!time) return toast('Informe data e horário.'); const runAt=new Date(`${date}T${time}:00`).getTime(); if(!Number.isFinite(runAt)||runAt<=Date.now()) return toast('Escolha um horário futuro.'); let fileData=null,fileName='',fileType=''; if(pub.file){fileData=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(pub.file);});fileName=pub.file.name;fileType=pub.file.type;} S.scheduledPosts=S.scheduledPosts||[]; S.scheduledPosts.push({id:uid(),runAt,createdAt:Date.now(),status:'agendada',projectId:pub.projectId,nets,text:pub.text,title:pub.title,productId:pub.productId,productImages:!!pub.productImages,mediaType:pub.productImages?'photo':pub.mediaType,autoPost:!!pub.autoPost,fileData,fileName,fileType,createdBy:me?.id||''});save(false);render();toast('Publicação salva na fila. Mantenha o painel, o Chrome e as sessões abertos.'); },
+  async submitPublish() { if(pub.postNow) return actions.runPublish(); const nets=POST_NETS.filter(n=>n==='facebook'?pub.nets.facebook:pub.nets[n]); if(!nets.length) return toast('Escolha ao menos uma rede.'); if(!pub.text.trim()&&!pub.file&&!pub.productImages&&!(pub.facebookDestinations.marketplace&&pub.productIds.length)) return toast('Escreva o texto, escolha um arquivo ou selecione um produto.'); const date=String(pub.scheduleDate||''),time=String(pub.scheduleTime||''); if(!date||!time) return toast('Informe data e horário.'); const runAt=new Date(`${date}T${time}:00`).getTime(); if(!Number.isFinite(runAt)||runAt<=Date.now()) return toast('Escolha um horário futuro.'); let fileData=null,fileName='',fileType=''; if(pub.file){fileData=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(pub.file);});fileName=pub.file.name;fileType=pub.file.type;} S.scheduledPosts=S.scheduledPosts||[]; S.scheduledPosts.push({id:uid(),runAt,createdAt:Date.now(),status:'agendada',projectId:pub.projectId,nets,text:pub.text,title:pub.title,productId:pub.productId,productIds:pub.productIds,productImages:!!pub.productImages,facebookDestinations:pub.facebookDestinations,marketplaceLocation:pub.marketplaceLocation,marketplaceGroups:pub.marketplaceGroups,marketplaceDelivery:pub.marketplaceDelivery,mediaType:pub.productImages?'photo':pub.mediaType,autoPost:!!pub.autoPost,fileData,fileName,fileType,createdBy:me?.id||''});save(false);render();toast('Publicação salva na fila. Mantenha o painel, o Chrome e as sessões abertos.'); },
   cancelScheduled(el) { S.scheduledPosts=(S.scheduledPosts||[]).filter(q=>q.id!==el.dataset.id);save(false);render();toast('Agendamento cancelado.'); },
   addStage(el) {
     if (!isAdmin()) return toast('Somente admins podem criar tarefas.');
@@ -831,6 +1179,7 @@ const actions = {
     save(); audit('project.deleted', 'project', p.id, { title: p.name }); render();
   },
   toggleMember(el) {
+    if (!isMasterAdmin()) return toast('Somente o MASTERADMIN pode alterar os integrantes dos projetos.');
     const p = proj(el.dataset.pid); p.memberIds = p.memberIds || [];
     const i = p.memberIds.indexOf(el.dataset.uid);
     if (el.checked && i < 0) p.memberIds.push(el.dataset.uid);
@@ -865,9 +1214,66 @@ const actions = {
     save(); render();
   },
 
-  selectPubProduct(el) { const p=P.find(x=>x.id===el.dataset.id); if(!p)return; pub.productId=p.id; const input=$('#pub-product-search'); if(input) input.value=p.title; const box=$('#pub-product-results'); if(box) box.innerHTML=''; },
+  selectPubProduct(el) {
+    const p = P.find(x => x.id === el.dataset.id);
+    if (!p) return;
+    const ids = Array.isArray(pub.productIds) ? pub.productIds : (pub.productId ? [pub.productId] : []);
+    const i = ids.indexOf(p.id);
+    if (i >= 0) ids.splice(i, 1); else ids.push(p.id);
+    pub.productIds = ids;
+    pub.productId = ids[0] || '';
+    const input = $('#pub-product-search'); if (input) input.value = '';
+    refreshPublishProductSelection();
+  },
   vitrinePage(el) { vitrinePage=Math.max(0,vitrinePage+(Number(el.dataset.page)||0)); renderVitrineResults(); },
   async deleteCatalogProduct(el) { const product=P.find(x=>String(x.id)===String(el.dataset.id)); if(!product) return toast('Produto não encontrado no catálogo.'); if(!confirm(`Excluir \"${product.title}\" do catálogo? Ele deixará de aparecer nas ofertas e na vitrine deste painel.`)) return; P=P.filter(x=>String(x.id)!==String(product.id)); await saveProducts(); audit('product.deleted','product',product.id,{title:product.title,projectId:product.projectId}); vitrinePage=0; render(); toast('Produto excluído do catálogo.'); },
+  openMarketplaceVitrine(el) {
+    const product = P.find(x => String(x.id) === String(el.dataset.id));
+    if (!product) return toast('Produto não encontrado no catálogo.');
+    if (!product.image) return toast('Este produto não possui imagem principal para publicar no Marketplace.');
+    Object.assign(marketplaceVitrineDialog, { open: true, productId: product.id, marketplaceLocation: pub.marketplaceLocation || 'Seropédica - Rio de Janeiro', postNow: true, scheduleDate: today(), scheduleTime: '12:00', busy: false });
+    render();
+  },
+  closeMarketplaceVitrine() {
+    if (!marketplaceVitrineDialog.busy) { marketplaceVitrineDialog.open = false; render(); }
+  },
+  async confirmMarketplaceVitrine() {
+    if (marketplaceVitrineDialog.busy) return;
+    const product = P.find(x => String(x.id) === String(marketplaceVitrineDialog.productId));
+    if (!product) return toast('Produto não encontrado no catálogo.');
+    if (!product.image) return toast('Este produto não possui imagem principal para publicar no Marketplace.');
+    if (!marketplaceVitrineDialog.postNow) {
+      const runAt = new Date(`${marketplaceVitrineDialog.scheduleDate}T${marketplaceVitrineDialog.scheduleTime}:00`).getTime();
+      if (!Number.isFinite(runAt) || runAt <= Date.now()) return toast('Escolha um dia e horário futuros.');
+    }
+    marketplaceVitrineDialog.busy = true;
+    render();
+    try {
+      pub.projectId = product.projectId || '';
+      pub.nets = { facebook: true };
+      pub.facebookDestinations = { feed: false, marketplace: true };
+      pub.file = null;
+      pub.productImages = false;
+      pub.mediaType = 'photo';
+      pub.productId = product.id;
+      pub.productIds = [product.id];
+      pub.marketplaceLocation = marketplaceVitrineDialog.marketplaceLocation.trim() || 'Seropédica - Rio de Janeiro';
+      pub.autoPost = true;
+      pub.postNow = marketplaceVitrineDialog.postNow;
+      pub.scheduleDate = marketplaceVitrineDialog.scheduleDate;
+      pub.scheduleTime = marketplaceVitrineDialog.scheduleTime;
+      await actions.genPostText();
+      if (marketplaceVitrineDialog.postNow) await actions.runPublish();
+      else await actions.submitPublish();
+      marketplaceVitrineDialog.open = false;
+      toast(marketplaceVitrineDialog.postNow ? 'Publicação do Marketplace iniciada.' : 'Publicação adicionada à fila da aba Publicar.');
+    } catch (e) {
+      toast(e.message || 'Não foi possível preparar a publicação do Marketplace.');
+    } finally {
+      marketplaceVitrineDialog.busy = false;
+      render();
+    }
+  },
   openProduct(el) { const p=P.find(x=>x.id===el.dataset.id); if(p?.url) chrome.tabs.create({url:p.url,active:true}); },
   copyOffer(el) {
     const p = P.find((x) => x.id === el.dataset.id);
@@ -877,13 +1283,12 @@ const actions = {
     insightsBusy = true; render();
     const top = offers(8); let items;
     try {
-      if (!S.settings.apiKey) throw new Error('sem chave');
       const t = await ai('Você é estrategista de conteúdo para afiliados no Brasil. Responda SOMENTE JSON: [{"produto":"","ideia":"","formato":"","gancho":""}] com 5 ideias de post para Instagram, TikTok, YouTube Shorts ou Facebook ligadas aos produtos. Não invente preços.',
-        JSON.stringify(top.map((p) => ({ titulo: p.title, preco: p.price, desconto: pct(p), categoria: p.category }))), 900);
+        JSON.stringify(top.map((p) => ({ titulo: p.title, preco: p.price, desconto: pct(p), categoria: p.category }))), 900, top[0]?.projectId || myProjects()[0]?.id);
       items = parseJSON(t);
     } catch (e) {
       items = top.slice(0, 5).map((p) => ({ produto: p.title, ideia: 'Mostre o produto em uso e termine com o preço atual (' + brl(p.price) + ').', formato: 'Reels ou TikTok de 15s', gancho: 'Achei isso por ' + brl(p.price) + '…' }));
-      if (S.settings.apiKey) toast('A IA falhou; mostrando sugestões básicas.');
+      toast('A IA falhou; mostrando sugestões básicas.');
     }
     S.insights = { date: today(), items }; insightsBusy = false; save(false); render();
   },
@@ -891,59 +1296,96 @@ const actions = {
   pickFile(el) { pub.file = el.files[0] || null; pub.productImages = false; if(pub.file) pub.mediaType = pub.file.type.startsWith('image/') ? 'photo' : 'video'; render(); },
   mediaType(el) { pub.mediaType = el.dataset.type; pub.file = null; pub.productImages = false; pub.nets = {}; render(); },
   productImagesMode() { pub.productImages = !pub.productImages; if(pub.productImages){pub.file=null;pub.mediaType='photo';pub.nets.youtube=false;} render(); },
+  pubFacebookDestination(el) { const destination = el.dataset.destination || 'feed'; pub.facebookDestinations[destination] = el.checked; pub.nets.facebook = Object.values(pub.facebookDestinations).some(Boolean); if (destination === 'marketplace' && el.checked) { pub.productImages = false; pub.file = null; pub.mediaType = 'photo'; } render(); },
   pubNet(el) { pub.nets[el.dataset.net] = el.checked; },
-  pubNetButton(el) { const n=el.dataset.net; if((pub.productImages || pub.mediaType==='photo') && n==='youtube') return toast('YouTube não aceita imagem neste fluxo. Escolha outra rede ou Vídeo.'); pub.nets[n]=!pub.nets[n]; render(); },
-  async testAI() { try { const result = await ai('Responda apenas com: conexão funcionando.', 'Teste de conexão da Vizzion.', 40); toast('IA respondeu: ' + result.slice(0,100)); } catch(e) { toast('Falha no teste da IA: ' + String(e.message||e).slice(0,180)); } },
+  pubNetButton(el) { const n=el.dataset.net; if(!pub.productImages && pub.mediaType==='photo' && n==='youtube') return toast('YouTube não aceita imagem neste fluxo. Escolha outra rede ou Vídeo.'); pub.nets[n]=!pub.nets[n]; render(); },
+  async testAI() { try { const result = await ai('Responda apenas com: conexão funcionando.', 'Teste de conexão da Vizzion.', 40, myProjects()[0]?.id); toast('IA respondeu: ' + result.slice(0,100)); } catch(e) { toast('Falha no teste da IA: ' + String(e.message||e).slice(0,180)); } },
   async genPostText() {
-    const p = P.find((x) => x.id === pub.productId);
-    if (!p) return toast('Pesquise e selecione um produto pelo nome.');
+    const ids = pub.productIds?.length ? pub.productIds : (pub.productId ? [pub.productId] : []);
+    const products = ids.map(id => P.find(x => x.id === id)).filter(Boolean);
+    if (!products.length) return toast('Pesquise e selecione ao menos um produto pelo nome.');
     let t;
     try {
-      t = await ai('Você escreve legendas curtas para redes sociais de afiliados, em português do Brasil: gancho na primeira linha, 2 a 3 linhas de benefício, 3 a 5 hashtags. Não invente preço, desconto ou características que não estejam nos dados.',
-        `Produto: ${p.title}\nPreço: ${brl(p.price)}${p.oldPrice ? ' (de ' + brl(p.oldPrice) + ')' : ''}\nCategoria: ${p.category || ''}`, 500);
-      t += `\n\n👉 ${p.url || ''}\n_Link de afiliado • preço pode mudar._`;
-    } catch (e) { t = offerBlock(p); toast('IA indisponível; usei o texto padrão.'); }
+      t = await ai('Você escreve somente a legenda final para redes sociais de afiliados, em português do Brasil: gancho na primeira linha, 2 a 3 linhas de benefício, 3 a 5 hashtags. Não invente preço, desconto ou características que não estejam nos dados. Nunca escreva rótulos como "Produto 1", "Produto 2", "Preço", "Categoria" ou explique os dados recebidos. Retorne apenas o texto pronto para publicar, sem markdown de instrução e sem links; os links serão adicionados pelo sistema.',
+        products.map((p, i) => `Produto ${i + 1}: ${p.title}\nPreço: ${brl(p.price)}${p.oldPrice ? ' (de ' + brl(p.oldPrice) + ')' : ''}\nCategoria: ${p.category || ''}\nLink: ${p.url || ''}`).join('\n\n'), 700, pub.projectId || products[0].projectId);
+      t = t.split(/\r?\n/).filter(line => {
+        const value = line.replace(/^Q+\s*/i, '').replace(/[*_`]/g, '').trim();
+        return value && !/^(?:produto\s*\d*\s*:|pre[cç]o\s*:|categoria\s*:|link\s*:)/i.test(value) && !/^https?:\/\/\S+$/i.test(value);
+      }).join('\n').trim();
+      t += `\n\n${products.map(p => `👉 ${p.url || ''}`).join('\n')}\n_Link de afiliado • preço pode mudar._`;
+    } catch (e) { t = products.map(offerBlock).join('\n\n'); toast('IA indisponível; usei o texto padrão.'); }
     pub.text = t; render();
   },
   async runPublish() {
-    const nets = POST_NETS.filter((n) => pub.nets[n]);
+    const targets = POST_NETS.flatMap((n) => n === 'facebook'
+      ? Object.entries(pub.facebookDestinations).filter(([, selected]) => selected).map(([destination]) => ({ n, destination }))
+      : pub.nets[n] ? [{ n, destination: 'feed' }] : []);
+    const nets = targets.map((target) => target.n);
     if (!nets.length) return toast('Escolha ao menos uma rede.');
-    if (!pub.text.trim() && !pub.file && !pub.productImages) return toast('Escreva o texto ou escolha um arquivo.');
+    const facebookMarketplace = pub.facebookDestinations.marketplace;
+    if (!pub.text.trim() && !pub.file && !pub.productImages && !(facebookMarketplace && pub.productIds.length)) return toast('Escreva o texto, escolha um arquivo ou selecione um produto.');
     let productFiles = [];
+    let related = [];
     if (pub.productImages) {
       const projectProducts = P.filter(p => p.image && (!p.projectId || !pub.projectId || p.projectId === pub.projectId));
       const normalize = v => strip(String(v || '')).replace(/[^a-z0-9]+/g, ' ').trim();
       const body = normalize(pub.text);
       const stop = new Set(['com','para','por','uma','uns','das','dos','que','the','and','com','sem','mais','novo','nova','oferta','produto','produtos','barato','barata']);
-      const related = projectProducts.filter(p => {
+      related = projectProducts.map(p => {
         const title = normalize(p.title); if (!title) return false;
-        if (body.includes(title) || (title.length >= 18 && body.includes(title.slice(0, 25)))) return true;
+        if (body.includes(title) || (title.length >= 18 && body.includes(title.slice(0, 25)))) return { p, score: 100 };
         const tokens = [...new Set(title.split(' ').filter(w => w.length >= 3 && !stop.has(w)))];
-        if (tokens.length < 2) return false;
+        if (tokens.length < 3) return { p, score: 0 };
         const hits = tokens.filter(w => body.split(' ').includes(w)).length;
-        return hits >= Math.max(2, Math.ceil(tokens.length * 0.35));
-      }).slice(0, 10);
+        return { p, score: hits >= Math.max(3, Math.ceil(tokens.length * 0.6)) ? hits / tokens.length : 0 };
+      }).filter(Boolean).filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 10).map(x => x.p);
       if (!related.length) return toast('Não encontrei no catálogo produtos mencionados no corpo do texto. Confira os nomes ou desative Imagem do produto.');
-      productFiles = await photoFilesFor(related, related.map(p => p.title).join(' | '), related.length);
-      if (!productFiles.length) return toast('Encontrei produtos mencionados, mas não consegui baixar suas fotos.');
-      toast(`${productFiles.length} foto(s) de produto encontrada(s) para anexar.`);
+      productFiles = await productMediaFilesFor(related, related.map(p => p.title).join(' | '), related.length);
+      if (!productFiles.length) return toast('Encontrei produtos mencionados, mas não consegui baixar suas mídias.');
+      toast(`${productFiles.length} mídia(s) de produto encontrada(s) para anexar.`);
     }
     pub.status = {};
-    for (const n of nets) {
-      pub.status[n] = { s: 'run', m: 'abrindo…' }; render();
+    for (const { n, destination } of targets) {
+      const statusKey = `${n}:${destination}`;
+      pub.status[statusKey] = { s: 'run', m: 'abrindo…' }; render();
       try {
-        if (pub.productImages && n === 'youtube') throw new Error('YouTube não aceita imagem neste fluxo.');
-        const mediaType = pub.productImages ? 'photo' : pub.mediaType;
-        const t = await getNetTab(n, { navigate: true, mediaType });
-        pub.status[n].m = 'enviando…'; render();
-        const filesToSend = pub.productImages ? productFiles : (pub.file ? [pub.file] : []);
+        if (pub.productImages && n === 'youtube' && !productFiles.some(item => item.type === 'video')) throw new Error('YouTube exige um vídeo no catálogo do produto.');
+        const mediaType = pub.productImages ? (n === 'youtube' || n === 'tiktok' && productFiles.some(item => item.type === 'video') ? 'video' : 'photo') : pub.mediaType;
+        const marketplaceProduct = destination === 'marketplace'
+          ? (pub.productIds.map(id => P.find(p => String(p.id) === String(id))).find(Boolean) || related[0] || null)
+          : null;
+        if (destination === 'marketplace' && !marketplaceProduct) throw new Error('Selecione ou mencione um produto do catálogo para criar o classificado.');
+        if (destination === 'marketplace') {
+          productFiles = await productMediaFilesFor(
+            [marketplaceProduct],
+            marketplaceProduct.title || '',
+            1,
+            { primaryImageOnly: true }
+          );
+          if (!productFiles.some(item => item.type === 'image')) {
+            throw new Error('O produto selecionado não possui imagem principal na coluna image do catálogo.');
+          }
+        }
+        const t = await getNetTab(n, { navigate: true, mediaType, destination });
+        pub.status[statusKey].m = 'enviando…'; render();
+        const filesToSend = pub.productImages
+          ? n === 'youtube' ? productFiles.filter(item => item.type === 'video').map(item => item.file).slice(0, 1)
+            : n === 'tiktok' ? (productFiles.some(item => item.type === 'video') ? productFiles.filter(item => item.type === 'video').map(item => item.file).slice(0, 1) : productFiles.filter(item => item.type === 'image').map(item => item.file))
+            : productFiles.map(item => item.file)
+          : destination === 'marketplace' ? productFiles.filter(item => item.type === 'image').map(item => item.file).slice(0, 10)
+            : (pub.file ? [pub.file] : []);
         const fileIds = [];
         for (const file of filesToSend) fileIds.push(await sendFile(t.id, n, file));
-        const networkText = n === 'tiktok' && String(pub.title || '').trim() ? `${String(pub.title).trim()}\n${pub.text || ''}` : pub.text;
-        const r = await sendToTab(t.id, n, { type: 'POST_FILL', fileIds, text: networkText, title: n === 'tiktok' ? pub.title : '', autoPost: !!pub.autoPost, mediaType });
+        const title = n === 'tiktok' ? String(pub.title || '').trim() : '';
+        const body = String(pub.text || '').trim();
+        const duplicateTitle = title && new RegExp(`^${title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*(?:\\r?\\n)+`, 'i').test(body);
+        const networkText = n === 'tiktok'
+          ? duplicateTitle ? body : [title, body].filter(Boolean).join('\n\n')
+          : pub.text;
+        const r = await sendToTab(t.id, n, { type: 'POST_FILL', fileIds, text: networkText, title: n === 'tiktok' ? pub.title : '', autoPost: !!pub.autoPost, mediaType, destination, marketplaceProduct, marketplaceLocation: pub.marketplaceLocation, marketplaceGroups: Math.max(0, Math.min(10, Number(pub.marketplaceGroups) || 0)), marketplaceDelivery: !!pub.marketplaceDelivery });
         if (!r?.ok) throw new Error(r?.error || 'sem resposta da aba');
-        pub.status[n] = { s: 'ok', m: pub.autoPost ? 'comando de publicação automática executado; confirme na plataforma' : 'pronto na aba — revise e publique' };
-      } catch (e) { pub.status[n] = { s: 'err', m: String(e.message || e).slice(0, 90) }; }
+        pub.status[statusKey] = { s: 'ok', m: pub.autoPost ? 'comando de publicação automática executado; confirme na plataforma' : 'pronto na aba — revise e publique' };
+      } catch (e) { pub.status[statusKey] = { s: 'err', m: String(e.message || e).slice(0, 90) }; }
       render();
     }
   },
@@ -953,7 +1395,7 @@ const actions = {
     let mediaData = ''; if (pub.file && pub.file.type.startsWith('image/') && pub.file.size <= 2 * 1024 * 1024) mediaData = await new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(String(r.result||'')); r.onerror = () => resolve(''); r.readAsDataURL(pub.file); });
     S.postsLog.push({ id: uid(), date: today(), projectId: pub.projectId, userId: me.id, nets, text: (pub.text || '').slice(0, 120), fullText: pub.text || '', title: pub.title || '', fileName: pub.file?.name || '', image: mediaData, ts: Date.now() });
     if (pub.projectId) syncPostTasks(pub.projectId);
-    Object.assign(pub, { status: {}, text: '', title: '', file: null, productImages: false, nets: {}, productId: '' });
+    Object.assign(pub, { status: {}, text: '', title: '', file: null, productImages: false, nets: {}, productId: '', productIds: [], facebookDestinations: { feed: false, marketplace: false } });
     save(); audit('post.recorded', 'post', S.postsLog[S.postsLog.length - 1]?.id, { title: pub.title || pub.text?.slice(0, 80) || 'Publicação registrada', projectId: pub.projectId, networks: nets }); toast('Post registrado.'); render();
   },
 
@@ -976,7 +1418,9 @@ const actions = {
     const last = [...att.history].reverse().find((m) => m.dir === 'in');
     if (!last) return toast('Nenhuma mensagem do cliente nesta conversa.');
     toast('Gerando resposta…');
-    const r = await botReply({ project: proj(att.projectId), history: histStr(att.history), customerMsg: last.text });
+    const project = ensureAttProject();
+    if (!project) return toast('Nenhum projeto autorizado está disponível para o atendimento.');
+    const r = await botReply({ project, history: histStr(att.history), customerMsg: last.text });
     att.draft = r.text; att.human = r.human; render();
   },
   async attFill() { await fillMsg(att.net, att.draft); toast('Texto no campo. Revise e aperte Enter.'); },
@@ -987,7 +1431,7 @@ const actions = {
   },
   async attWatch() {
     const on = !att.watching;
-    if (on && !att.projectId) throw new Error('Selecione o projeto que será usado no atendimento.');
+    if (on && !ensureAttProject()) return toast('Nenhum projeto autorizado está disponível para iniciar o atendimento.');
     att.mode = 'auto';
     att.watching = on;
     render();
@@ -1004,7 +1448,9 @@ const actions = {
   async attSim() {
     if (!att.sim.trim()) return;
     toast('Gerando…');
-    const r = await botReply({ project: proj(att.projectId), history: '', customerMsg: att.sim });
+    const project = ensureAttProject();
+    if (!project) return toast('Nenhum projeto autorizado está disponível para o atendimento.');
+    const r = await botReply({ project, history: '', customerMsg: att.sim });
     att.simOut = r.text + (r.human ? '\n\n[🔔 Encaminharia para humano]' : ''); render();
   },
 
@@ -1045,7 +1491,7 @@ const actions = {
       const list = products.map((p, i) => `${i + 1}. ${p.title} | preço: ${brl(p.price)}${p.oldPrice ? ` | preço anterior: ${brl(p.oldPrice)}` : ''}${p.store ? ` | loja: ${p.store}` : ''}`).join('\n');
       const generated = await ai(
         'Você é redator de ofertas para grupos brasileiros de WhatsApp/Telegram. Escreva uma única mensagem introdutória curta, natural e atraente em português brasileiro, com 1 a 3 frases e emojis moderados. Use apenas os produtos fornecidos, não invente descontos, urgência, estoque ou características. Não repita links nem liste todos os preços, pois cada produto será enviado separadamente depois. Retorne somente o texto da mensagem.',
-        `Crie uma mensagem adicional para acompanhar estes produtos selecionados:\n${list}\n\nProjeto/marca: ${proj(off.projectId)?.bot?.brand || proj(off.projectId)?.name || 'loja de achadinhos'}. Rede: ${NETS[off.net]?.name || off.net}.`, 260);
+        `Crie uma mensagem adicional para acompanhar estes produtos selecionados:\n${list}\n\nProjeto/marca: ${proj(off.projectId)?.bot?.brand || proj(off.projectId)?.name || 'loja de achadinhos'}. Rede: ${NETS[off.net]?.name || off.net}.`, 260, off.projectId);
       if (!generated) throw new Error('A IA não retornou uma mensagem.');
       off.message = generated.trim();
       const textarea = document.querySelector('#off-message');
@@ -1060,7 +1506,7 @@ const actions = {
     const typed = prompt('Esta ação apagará TODOS os produtos compartilhados no banco de dados e neste navegador. Para confirmar, digite APAGAR CATALOGO:');
     if (typed !== 'APAGAR CATALOGO') return toast('Operação cancelada.');
     try {
-      await api('/products', { method: 'PUT', body: JSON.stringify({ products: [] }) });
+      await api('/products', { method: 'DELETE' });
       clearTimeout(productPushT);
       P = []; IDX.clear();
       await chrome.storage.local.set({ cc_products: [] });
@@ -1089,12 +1535,10 @@ const actions = {
     const k = Math.max(1, Math.min(5, groups.length || 3));
     off.busy = true; render();
     let pairs = [];
-    if (S.settings.apiKey) {
-      try {
-        pairs = parseJSON(await ai('Você escreve textos curtos de ofertas para grupos de WhatsApp/Telegram em português do Brasil. Responda SOMENTE JSON: [{"intro":"","outro":""}]. intro = 1 linha com emoji; outro = 1 linha de chamada. Cada variação deve usar palavras bem diferentes. Não cite preços nem links.',
-          `Gere ${k} variações para: ${items.map((p) => p.title).join(' | ')}`, 700));
-      } catch (e) { toast('IA indisponível; usando modelos padrão.'); }
-    }
+    try {
+      pairs = parseJSON(await ai('Você escreve textos curtos de ofertas para grupos de WhatsApp/Telegram em português do Brasil. Responda SOMENTE JSON: [{"intro":"","outro":""}]. intro = 1 linha com emoji; outro = 1 linha de chamada. Cada variação deve usar palavras bem diferentes. Não cite preços nem links.',
+        `Gere ${k} variações para: ${items.map((p) => p.title).join(' | ')}`, 700, off.projectId));
+    } catch (e) { toast('IA indisponível; usando modelos padrão.'); }
     if (!pairs.length) pairs = [
       { intro: '🔥 Ofertas imperdíveis de hoje!', outro: 'Corre que o estoque acaba rápido!' },
       { intro: '🛍️ Achadinhos selecionados pra você', outro: 'Aproveite enquanto está nesse preço!' },
@@ -1126,6 +1570,9 @@ const actions = {
     const files = [...(el.files || [])];
     if (!files.length) return;
     const targetProject = (el.dataset.pid || (route.startsWith('catalogo:') ? route.slice(9) : route.startsWith('proj:') ? route.slice(5) : catProjectId)) || '';
+    if (!isAdmin()) return toast('Apenas administradores podem importar catálogos.');
+    if (!targetProject) return toast('Selecione um projeto antes de importar a planilha.');
+    if (!myProjects().some((project) => String(project.id) === String(targetProject))) return toast('Você não tem acesso a este projeto.');
     const merged = [];
     let invalid = 0;
     for (const f of files) {
@@ -1139,16 +1586,18 @@ const actions = {
       if (!Array.isArray(rows) || !rows.some(r => normProduct(r))) { invalid++; continue; }
       merged.push(...rows.map(normProduct).filter(Boolean));
       if (AUTH?.access_token && base() && f.size <= 15*1024*1024) {
-        try { const data = await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(f);}); await api('/catalog-file',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:f.name,type:f.type||'text/csv',data})}); }
+        try { const data = await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(f);}); await api('/catalog-file',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:f.name,type:f.type||'text/csv',projectId:targetProject,data})}); }
         catch(e) { console.warn('saving original catalog file',e); }
       }
     }
     if (!merged.length) return toast('Nenhum arquivo válido. Use CSV/JSON com as colunas id, nome, preco, preco_anterior, categoria, imagem url e url.');
     const seen = new Set();
     const imported = merged.map(p => ({...p, projectId: targetProject || p.projectId || ''})).filter(p => seen.has(p.id) ? false : (seen.add(p.id), true));
-    P = targetProject ? [...P.filter(p => p.projectId !== targetProject), ...imported] : imported;
+    P = [...P.filter(p => p.projectId !== targetProject), ...imported];
     IDX.clear(); await saveProducts();
-    toast(`${imported.length} produtos importados de ${files.length} arquivo(s)${invalid ? `; ${invalid} arquivo(s) ignorado(s)` : ''}${targetProject?' para o projeto':' no catálogo'}.`); render();
+    clearTimeout(productPushT);
+    const synced = await pushProductsRemote(targetProject, imported);
+    toast(`${imported.length} produtos importados de ${files.length} arquivo(s)${invalid ? `; ${invalid} arquivo(s) ignorado(s)` : ''} para o projeto${synced ? ' e sincronizados' : ''}.`); render();
   },
   async clearProducts() { if (!confirm('Apagar todo o catálogo local?')) return; P = []; IDX.clear(); await saveProducts(); render(); },
   async catSearch() {
@@ -1164,12 +1613,12 @@ const actions = {
   async pull() { const ok = await pullRemote(true); const productsOk = await pullProductsRemote(); try { await refreshTeam(); } catch {} toast(ok || productsOk ? 'Dados da equipe e catálogo sincronizados.' : 'Nada para baixar (ou backend indisponível).'); render(); },
   async refreshActivity() { await loadActivity(); },
   async push() { await pushRemote(); await pushProductsRemote(); toast('Dados e catálogo enviados para a equipe.'); },
-  export() { const { apiKey, backendToken, ...settings } = S.settings; download(`centro-de-comando-${today()}.json`, JSON.stringify({ state: { ...S, settings }, products: P }, null, 1)); },
+  export() { const { backendToken, ...settings } = S.settings; download(`centro-de-comando-${today()}.json`, JSON.stringify({ state: { ...S, settings }, products: P }, null, 1)); },
   async import(el) {
     const f = el.files[0];
-    if (!f || !confirm('Importar vai substituir os dados atuais (a chave da API é mantida). Continuar?')) return;
+    if (!f || !confirm('Importar vai substituir os dados atuais. Continuar?')) return;
     const j = JSON.parse(await f.text());
-    const keep = { apiKey: S.settings.apiKey, backendToken: S.settings.backendToken };
+    const keep = { backendToken: S.settings.backendToken };
     S = Object.assign(DEFAULT(), j.state); S.settings = Object.assign(DEFAULT().settings, S.settings, keep);
     if (j.products) { P = j.products; IDX.clear(); await saveProducts(); }
     me = user(me?.id) || null; save(); render();
@@ -1183,10 +1632,10 @@ async function processScheduledPosts() {
   const item = S.scheduledPosts.find(q => q.status === 'agendada' && Number(q.runAt) <= Date.now());
   if (!item) return;
   scheduleTickBusy = true;
-  const previous = { projectId:pub.projectId, nets:pub.nets, file:pub.file, productImages:pub.productImages, text:pub.text, title:pub.title, productId:pub.productId, status:pub.status, mediaType:pub.mediaType, autoPost:pub.autoPost };
+  const previous = { projectId:pub.projectId, nets:pub.nets, file:pub.file, productImages:pub.productImages, text:pub.text, title:pub.title, productId:pub.productId, productIds:pub.productIds, status:pub.status, mediaType:pub.mediaType, autoPost:pub.autoPost };
   try {
     item.status = 'executando'; item.startedAt = Date.now(); save(false); render();
-    pub.projectId=item.projectId||''; pub.nets=Object.fromEntries((item.nets||[]).map(n=>[n,true])); pub.text=item.text||''; pub.title=item.title||''; pub.productId=item.productId||''; pub.productImages=!!item.productImages; pub.mediaType=item.mediaType||'video'; pub.autoPost=!!item.autoPost; pub.status={};
+    pub.projectId=item.projectId||''; pub.nets=Object.fromEntries((item.nets||[]).map(n=>[n,true])); pub.facebookDestinations=item.facebookDestinations||{feed:!!item.nets?.includes('facebook'),marketplace:false}; pub.nets.facebook=Object.values(pub.facebookDestinations).some(Boolean); pub.text=item.text||''; pub.title=item.title||''; pub.productId=item.productId||''; pub.productIds=Array.isArray(item.productIds)&&item.productIds.length?item.productIds:(item.productId?[item.productId]:[]); pub.productImages=!!item.productImages; pub.marketplaceLocation=item.marketplaceLocation||'Seropédica - Rio de Janeiro'; pub.marketplaceGroups=item.marketplaceGroups??10; pub.marketplaceDelivery=item.marketplaceDelivery!==false; pub.mediaType=item.mediaType||'video'; pub.autoPost=!!item.autoPost; pub.status={};
     pub.file = item.fileData ? await (async()=>{const r=await fetch(item.fileData);const b=await r.blob();return new File([b],item.fileName||'media', {type:item.fileType||b.type});})() : null;
     await actions.runPublish();
     const failed = (item.nets||[]).filter(n=>pub.status[n]?.s==='err');
@@ -1208,6 +1657,7 @@ document.addEventListener('click', (e) => {
 document.addEventListener('change', (e) => {
   const el = e.target;
   if (el.type === 'file' && el.dataset.act) return run(actions[el.dataset.act], el, e);
+  if (el.dataset.mkt) { marketplaceVitrineDialog[el.dataset.mkt] = el.type === 'checkbox' ? el.checked : el.value; render(); return; }
   if (el.dataset.catProject) { catProjectId = el.value; route = 'catalogo'; render(); return; }
   if (el.dataset.urgency) { const st = stagesOf(el.dataset.scope).find(x=>x.id===el.dataset.id); if(st) st.urgency=el.value; save(); render(); return; }
   if (el.dataset.path) return setBound(el.dataset.path, el.dataset.type === 'number' ? Number(el.value || 0) : el.value);
@@ -1216,7 +1666,7 @@ document.addEventListener('change', (e) => {
 document.addEventListener('input', (e) => {
   const el=e.target;
   if(el.id==='cat-q') { actions.catSearch(); return; }
-  if(el.id==='pub-product-search') { pub.productId=''; renderPubProductResults(); return; }
+  if(el.id==='pub-product-search') { renderPubProductResults(); return; }
   if(el.id==='off-product-search') { off.query=el.value; const q=String(off.query||'').trim().toLowerCase(); const ms=q?P.filter(p=>(!p.projectId||p.projectId===off.projectId)&&String(p.title||'').toLowerCase().includes(q)).slice(0,30):[]; const box=$('#off-product-results'); if(box)box.innerHTML=ms.map(p=>`<div class="row"><div class="grow">${p.image?`<img src="${esc(p.image)}" alt="" style="width:48px;height:48px;object-fit:contain;vertical-align:middle;margin-right:10px">`:''}<b>${esc(p.title)}</b><div class="muted">${brl(p.price)}${p.oldPrice?` · de ${brl(p.oldPrice)}`:''}</div></div><button class="btn ${off.selectedProducts.some(x=>x.id===p.id)?'':'ghost'}" data-act="offAddProduct" data-id="${esc(p.id)}">${off.selectedProducts.some(x=>x.id===p.id)?'✓ Selecionado':'Selecionar produto'}</button></div>`).join('')||(q?'<p class="muted">Nenhum produto correspondente.</p>':''); return; }
   if(el.id==='vitrine-q') { window.__vizzionVitrineQuery=el.value; vitrinePage=0; renderVitrineResults(); return; }
   if(el.id==='vitrine-min') { window.__vizzionVitrineMin=el.value; vitrinePage=0; renderVitrineResults(); return; }
@@ -1230,6 +1680,7 @@ function bindField(el, isChange) {
     if (el.dataset[k] !== undefined) {
       const previous = map[k][el.dataset[k]];
       map[k][el.dataset[k]] = el.type === 'checkbox' ? el.checked : el.value;
+      if (k === 'pub' && isChange && el.dataset[k] === 'projectId' && previous !== map[k][el.dataset[k]]) { pub.productId = ''; pub.productIds = []; }
       if (k === 'off' && isChange && ['net','projectId'].includes(el.dataset[k]) && previous !== map[k][el.dataset[k]]) { off.recipientSel = []; off.selectAll = false; if (el.dataset[k] === 'projectId') off.selectedProducts = []; }
       if (isChange && k === 'att' && el.dataset.att === 'net' && previous !== el.value && att.watching) {
         att.watching = false;
@@ -1278,7 +1729,12 @@ async function onIncoming(m) {
     if (!customerMsg) { entry.st = 'não foi possível ler a mensagem'; if (route === 'atendimento') render(); return; }
     // Atualiza o texto do evento depois do OCR e não responde em grupos.
     entry.msg = customerMsg.slice(0, 80);
-    const project = proj(att.projectId);
+    const project = ensureAttProject();
+    if (!project) {
+      entry.st = 'nenhum projeto autorizado para o atendimento';
+      if (route === 'atendimento') render();
+      return;
+    }
     const auto = att.mode === 'auto' && !m.group;
     const trySend = async (text) => {
       const now = Date.now();
@@ -1440,10 +1896,14 @@ async function processOfferQueue() {
   if (AUTH && S.settings.backendUrl) {
     const valid = await ensureAuth();
     if (valid) {
-      try { await refreshTeam(); await pullRemote(); await pullProductsRemote(); } catch (e) { console.warn('initial backend sync', e); }
+      try {
+        await refreshTeam();
+        const localStateLooksEmpty = !S.projects.length && !S.tasks.length && !S.postsLog.length;
+        await pullRemote(localStateLooksEmpty);
+        await pullProductsRemote();
+      } catch (e) { console.warn('initial backend sync', e); }
       me = S.users.find(u => u.id === me?.id) || me;
       if (me && S.lastGen !== today()) generateTasks();
-      if (me) await autoActivateGemini();
     } else { AUTH = null; me = null; await chrome.storage.local.remove(['cc_auth', 'cc_profile']); }
   } else { AUTH = null; me = null; }
   window.addEventListener('focus', () => { if (document.title.startsWith('🔔')) document.title = 'Vizzion · Centro de Comando'; });
