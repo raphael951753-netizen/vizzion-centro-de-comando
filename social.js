@@ -56,7 +56,7 @@
     // Instagram exige passar pelas telas de enquadramento/filtros antes de mostrar a legenda.
     // O enquadramento inicial da plataforma é centralizado; não tentamos preencher a legenda
     // até que o editor de legenda esteja realmente disponível.
-    const capSel = 'div[aria-label*="legenda" i][contenteditable="true"],div[aria-label*="caption" i][contenteditable="true"],div[contenteditable="true"][role="textbox"],textarea[aria-label*="legenda" i],textarea[aria-label*="caption" i]';
+    const capSel = 'div[aria-label*="legenda" i][contenteditable="true"],div[aria-label*="caption" i][contenteditable="true"],div[data-placeholder*="legenda" i][contenteditable="true"],div[data-placeholder*="caption" i][contenteditable="true"],textarea[placeholder*="legenda" i],textarea[placeholder*="caption" i],textarea[aria-label*="legenda" i],textarea[aria-label*="caption" i],div[contenteditable="true"][role="textbox"]';
     const visible = (el) => {
       if (!el || !el.isConnected || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
       const r = el.getBoundingClientRect();

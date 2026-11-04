@@ -1368,7 +1368,7 @@ function interpretarComandoLocal(text, anexos) {
         !/\b(menor|maior)\s+pre[cç]o\b/i.test(candidatoNome) &&
         candidatoNome.length <= 40) {
       produtoNome = candidatoNome;
-    } else if (/(mais|menos)\s+(barato|caro)/i.test(candidatoNome) || /(menor|maior)\s+pre[cç]o/i.test(candidatoNome)) {
+    } else if (/\b(mais|menos)\s+(barato|caro)\b/i.test(candidatoNome) || /\b(menor|maior)\s+pre[cç]o\b/i.test(candidatoNome)) {
       const mMarca = candidatoNome.match(/^([a-zà-ú0-9 .\-]{2,20}?)\s+(mais|menos)\s+(barato|caro)|^([a-zà-ú0-9 .\-]{2,20}?)\s+(menor|maior)\s+pre[cç]o/i);
       if (mMarca) {
         const marca = (mMarca[1] || mMarca[4]).trim();
