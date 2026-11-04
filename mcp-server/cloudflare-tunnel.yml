@@ -4,16 +4,6 @@
 #
 # Execucao:
 #   cloudflared tunnel --config mcp-server/cloudflare-tunnel.yml run
-#
-# Alternativa fixa (sem tunnel): use o Cloudflare Worker em mcp-worker.js
-#   1. Instale wrangler: npm install -g wrangler
-#   2. wrangler login
-#   3. Defina wrangler.toml MCP_BACKEND_URL para a URL do seu MCP (ex: http://localhost:8787 ou URL do tunnel)
-#   4. wrangler deploy
-#   5. No painel Vizzion (Configuracoes), defina URL do MCP como https://<seu-worker>.workers.dev/mcp
-#
-# O Worker e um proxy reverso fixo: nao expõe o localhost diretamente, ele encaminha
-# requisicoes MCP para o backend configurado em MCP_BACKEND_URL.
 
 tunnel: vizzion-mcp
 credentials-file: ./vizzion-mcp.json

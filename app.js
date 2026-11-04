@@ -12,7 +12,6 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const pad = (n) => String(n).padStart(2, '0');
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
-function parsePrecoBr(v) { return parseFloat(String(v || '').replace(/[^\d,]/g, '').replace(',', '.')); }
 const brl = (n) => (n == null ? '—' : Number(n).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }));
 const shuffle = (a) => [...a].sort(() => Math.random() - 0.5);
 const strip = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -63,7 +62,7 @@ async function getNetTab(net, { open = true, navigate = false, mediaType = 'vide
     ? `https://www.tiktok.com/tiktokstudio/upload?from=creator_center&tab=${mediaType === 'photo' ? 'photo' : 'video'}`
     : net === 'facebook' && destination === 'marketplace'
       ? 'https://www.facebook.com/marketplace/?ref=bookmark'
-      : n.url;
+    : n.url;
   const tabs = (await chrome.tabs.query(net === 'whatsapp' ? {} : { windowId: winId })).filter((t) => {
     if (!t.url || new URL(t.url).hostname !== n.host) return false;
     if (net !== 'facebook') return true;
@@ -71,22 +70,11 @@ async function getNetTab(net, { open = true, navigate = false, mediaType = 'vide
     return destination === 'marketplace' ? isMarketplace : !isMarketplace;
   });
   let t = tabs[0];
-  // Compara URLs ignorando par�metros de query para TikTok (Studio varia os query params)
-  const urlMatchesTarget = (tabUrl, target) => {
-    if (net === 'tiktok') {
-      try {
-        const tu = new URL(tabUrl);
-        const tgt = new URL(target);
-        return tu.pathname === tgt.pathname && tu.searchParams.get('tab') === tgt.searchParams.get('tab');
-      } catch { return tabUrl === target; }
-    }
-    return tabUrl === target;
-  };
   if (!t && open) {
     t = await chrome.tabs.create({ windowId: winId, url: targetUrl, active: false });
     await waitLoad(t.id);
     await sleep(1500);
-  } else if (t && navigate && (n.navigate || destination === 'marketplace') && !urlMatchesTarget(t.url, targetUrl)) {
+  } else if (t && navigate && (n.navigate || destination === 'marketplace') && t.url !== targetUrl) {
     await chrome.tabs.update(t.id, { url: targetUrl });
     await waitLoad(t.id);
     await sleep(1500);
@@ -144,43 +132,6 @@ async function refreshNotificationCounts(silent = true) {
 }
 
 async function sendFile(tabId, net, file) {
-  if (net === 'tiktok') {
-    const buf = await file.arrayBuffer();
-    const base64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-    const dataUrl = `data:${file.type};base64,${base64}`;
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      world: 'MAIN',
-      func: (dataUrl, fileName, fileType) => {
-        function findFileInput(root) {
-          if (!root) return null;
-          const input = root.querySelector('input[type="file"]');
-          if (input) return input;
-          for (const el of root.querySelectorAll('*')) {
-            if (el.shadowRoot) {
-              const found = findFileInput(el.shadowRoot);
-              if (found) return found;
-            }
-          }
-          return null;
-        }
-        const input = findFileInput(document);
-        if (!input) throw new Error('Input de arquivo do TikTok n�o encontrado');
-        return fetch(dataUrl)
-          .then(res => res.blob())
-          .then(blob => {
-            const f = new File([blob], fileName, { type: fileType });
-            const dt = new DataTransfer();
-            dt.items.add(f);
-            try { input.files = dt.files; }
-            catch(e) { Object.defineProperty(input, 'files', { value: dt.files, writable: false }); }
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-          });
-      },
-      args: [dataUrl, file.name, file.type]
-    });
-    return;
-  }
   const id = uid();
   const buf = new Uint8Array(await file.arrayBuffer());
   const CH = 3 * 1024 * 1024;
@@ -192,21 +143,6 @@ async function sendFile(tabId, net, file) {
     await sendToTab(tabId, net, { type: 'FILE_CHUNK', id, idx: i, total, name: file.name, mime: file.type, data: btoa(bin) });
   }
   return id;
-}
-
-// Aguarda o TikTok confirmar que a midia foi processada e esta pronta para receber a legenda.
-// Polling com FILE_STATUS ate receber ready:true ou atingir o timeout (30s).
-async function waitForTikTokMediaReady(tabId, fileIds, timeoutMs = 30000) {
-  const start = Date.now();
-  const interval = 1500;
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const r = await sendToTab(tabId, 'tiktok', { type: 'FILE_STATUS', fileIds });
-      if (r && r.ready === true) return true;
-    } catch (_) {}
-    await sleep(interval);
-  }
-  return false;
 }
 
 
@@ -281,10 +217,9 @@ async function sendPhotos(net, expectedChat, files, caption = '') {
 const DEFAULT_BACKEND_URL = 'https://ttytmrjqjkdqeksyoxts.supabase.co/functions/v1/vizzion-api';
 const DEFAULT = () => ({
   users: [],
-  settings: { backendUrl: DEFAULT_BACKEND_URL, backendToken: '', mcpUrl: 'http://127.0.0.1:8787', mcpToken: '', geminiKey: '', geminiModel: 'gemini-3.5-flash-lite', stagesPerDay: 2, autoMaxPerHour: 20, botPhotosMax: 3, photoTabSwitch: true },
+  settings: { backendUrl: DEFAULT_BACKEND_URL, backendToken: '', mcpUrl: 'http://127.0.0.1:8787', mcpToken: '', stagesPerDay: 2, autoMaxPerHour: 20, botPhotosMax: 3, photoTabSwitch: true },
   offerSendQueue: [],
   general: { stages: [], note: '', messages: [] },
-  chat: { channels: [{ id: 'geral', name: 'Geral' }, { id: 'ia', name: 'IA · Migoo', type: 'ia' }], messages: [] },
   projects: [],
   tasks: [],
   postsLog: [],
@@ -294,26 +229,7 @@ const DEFAULT = () => ({
   insights: null,
   updatedAt: 0,
 });
-let S, P = [], me = null, AUTH = null, ACTIVITY = [], route = 'hoje', routeChat = 'geral';
-let chatAnexos = [];
-let mcpConectado = false;
-let geminiConectado = false;
-function isGeminiConectado(projectId = '') {
-  // Chave global tem precedencia
-  if (String(S.settings.geminiKey || '').trim()) return true;
-  // Se houver projeto selecionado, verificar chave do projeto
-  if (projectId) {
-    const p = proj(projectId);
-    if (p && p.aiConfigured) return true;
-    // Verificar status cached do projeto
-    const st = aiProjectStatus && aiProjectStatus[projectId];
-    if (st && st.configured) return true;
-  }
-  return false;
-}
-function refreshGeminiStatus(projectId = '') {
-  geminiConectado = isGeminiConectado(projectId);
-}
+let S, P = [], me = null, AUTH = null, ACTIVITY = [], route = 'hoje';
 const proj = (id) => S.projects.find((p) => p.id === id);
 const user = (id) => S.users.find((u) => u.id === id);
 const stagesOf = (sc) => (sc === 'general' ? S.general.stages : proj(sc)?.stages || []);
@@ -327,9 +243,6 @@ async function load() {
   S.settings = Object.assign(DEFAULT().settings, S.settings);
   S.general = Object.assign(DEFAULT().general, S.general);
   S.general.messages = Array.isArray(S.general.messages) ? S.general.messages : [];
-  S.chat = Object.assign(DEFAULT().chat, S.chat || {});
-  S.chat.channels = Array.isArray(S.chat.channels) ? S.chat.channels : DEFAULT().chat.channels;
-  S.chat.messages = Array.isArray(S.chat.messages) ? S.chat.messages : [];
   const hadLegacyAiSettings = ['apiKey', 'apiUrl', 'provider', 'model'].some((key) => Object.prototype.hasOwnProperty.call(S.settings, key));
   delete S.settings.apiKey;
   delete S.settings.apiUrl;
@@ -495,7 +408,7 @@ async function loadActivity() {
 const ALIAS = {
   id: ['id', 'sku', 'mlb', 'itemid', 'product_id'], title: ['title', 'titulo', 'título', 'nome', 'name', 'product_name'], price: ['sale_price', 'current_price', 'preco_atual', 'preço_atual', 'preco', 'preço', 'valor', 'price'],
   oldPrice: ['oldprice', 'preco_antigo', 'preço_antigo', 'preco_original', 'original_price', 'de', 'price_before_discount', 'originalprice', 'preco_anterior'],
-  url: ['url', 'link', 'link_afiliado', 'affiliate_url', 'afiliado', 'offerlink', 'offer_link', 'product_link', 'product_short link', 'product_short_link'], image: ['imagem url', 'image url', 'imagem_url', 'image_url', 'image', 'imagem', 'img', 'thumbnail', 'image_link', 'image_link_3'],
+  url: ['url', 'link', 'link_afiliado', 'affiliate_url', 'afiliado', 'product_link', 'product_short link', 'product_short_link'], image: ['imagem url', 'image url', 'imagem_url', 'image_url', 'image', 'imagem', 'img', 'thumbnail', 'image_link', 'image_link_3'],
   category: ['category', 'categoria', 'global_category2', 'global_category3'], store: ['store', 'loja', 'marketplace', 'shop_name'], sales: ['sales', 'vendas', 'sold', 'vendidos', 'historical_sold'], rating: ['rating', 'nota', 'avaliacao', 'avaliação'],
 };
 function normProduct(r) {
@@ -690,224 +603,6 @@ let projectTab = 'identidade';
 const aiProjectStatus = {};
 const STL = { todo: 'A fazer', doing: 'Em andamento', done: 'Concluída' };
 
-/* ============================================================
-   TOOL REGISTRY - Centralized executable tool system
-   Each tool is registered with name, description, parameters,
-   execute function, permissions, and category.
-   ============================================================ */
-const TOOL_REGISTRY = new Map();
-function registerTool(name, def) { TOOL_REGISTRY.set(name, { ...def, name }); }
-function getTool(name) { return TOOL_REGISTRY.get(name); }
-function getAllTools() { return Array.from(TOOL_REGISTRY.values()); }
-function getGeminiFunctionDeclarations() {
-  return getAllTools().map(t => ({ name: t.name, description: t.description || '', parameters: t.parameters || { type: 'object', properties: {}, required: [] } }));
-}
-async function executeTool(name, args = {}) {
-  const tool = TOOL_REGISTRY.get(name);
-  if (!tool) throw new Error(`Ferramenta n\u00e3o registrada: ${name}`);
-  if (tool.requiresAuth && !AUTH) throw new Error('Autentica\u00e7\u00e3o necess\u00e1ria para esta ferramenta.');
-  if (tool.requiresAdmin && !isAdmin()) throw new Error('Acesso restrito a administradores para esta ferramenta.');
-  try {
-    const start = Date.now();
-    const result = await tool.execute(args, { projectId: pub.projectId, userId: me?.id, token: AUTH?.access_token });
-    const duration = Date.now() - start;
-    console.log(`[TOOL] ${name} executed in ${duration}ms`, { args, result: typeof result === 'string' ? result.slice(0, 200) : result });
-    return { success: true, result, duration };
-  } catch (e) {
-    console.error(`[TOOL] ${name} failed:`, e);
-    return { success: false, error: e.message || String(e) };
-  }
-}
-
-/* ---------- Publishing tools ---------- */
-registerTool('publish_post', {
-  name: 'publish_post',
-  description: 'Publica um post em redes sociais (facebook, instagram, tiktok, youtube) com texto e m\u00eddia opcional.',
-  parameters: { type: 'object', properties: { texto: { type: 'string', description: 'Texto/legenda do post.' }, redes: { type: 'array', items: { type: 'string', enum: ['facebook', 'instagram', 'tiktok', 'youtube'] }, description: 'Lista de redes para publicar.' }, produto_id: { type: 'string', description: 'ID do produto do cat\u00e1logo para usar m\u00eddia do produto.' }, produto_nome: { type: 'string', description: 'Nome do produto (opcional).' }, produto_images: { type: 'boolean', description: 'Usar m\u00eddias do produto do cat\u00e1logo.' }, arquivo_nome: { type: 'string', description: 'Nome do arquivo anexado (opcional).' }, arquivo_tipo: { type: 'string', description: 'Tipo MIME do arquivo (opcional).' }, arquivo_dados: { type: 'string', description: 'Dados base64 do arquivo (opcional).' }, facebook_destino: { type: 'string', enum: ['feed', 'marketplace'], description: 'Destino do Facebook: feed ou marketplace.' }, automatico: { type: 'boolean', description: 'Tentar publicar automaticamente (default true).' }, agendado: { type: 'boolean', description: 'Se verdadeiro, agenda em vez de publicar agora.' }, schedule_date: { type: 'string', description: 'Data do agendamento (YYYY-MM-DD).' }, schedule_time: { type: 'string', description: 'Hor\u00e1rio do agendamento (HH:MM).' } }, required: ['texto', 'redes'] },
-  requiresAuth: false, category: 'publicacao',
-  async execute(args) {
-    prepararPublicacaoChat({ redes: args.redes, texto: args.texto, produto_id: args.produto_id, produto_nome: args.produto_nome, produtoImages: args.produto_images, arquivo_dados: args.arquivo_dados, arquivo_nome: args.arquivo_nome, arquivo_tipo: args.arquivo_tipo, facebook_destino: args.facebook_destino, automatico: args.automatico !== false, agendado: args.agendado, schedule_date: args.schedule_date, schedule_time: args.schedule_time, postNow: !args.agendado });
-    const redesSelecionadas = Object.keys(pub.nets).filter(n => pub.nets[n]);
-    if (!redesSelecionadas.length) throw new Error('Informe ao menos uma rede.');
-    if (pub.facebookDestinations.marketplace && !pub.productIds.length) throw new Error('Marketplace requer um produto do cat\u00e1logo.');
-    route = 'publicar'; render();
-    if (pub.postNow) { await actions.runPublish(); return { success: true, message: 'Publicacao executada para ' + redesSelecionadas.join(', ') + '.' }; }
-    else { await actions.submitPublish(); return { success: true, message: 'Publicacao agendada para ' + redesSelecionadas.join(', ') + '.' }; }
-  }
-});
-
-registerTool('generate_post_text', {
-  name: 'generate_post_text',
-  description: 'Gera texto/legenda para redes sociais baseado em produtos selecionados.',
-  parameters: { type: 'object', properties: { produto_ids: { type: 'array', items: { type: 'string' }, description: 'IDs dos produtos.' }, produto_nome: { type: 'string', description: 'Nome do produto (se n\u00e3o tiver ID).' }, rede: { type: 'string', description: 'Rede social para adaptar o texto.' } }, required: [] },
-  requiresAuth: false, category: 'publicacao',
-  async execute(args) {
-    let products = [];
-    if (args.produto_ids && args.produto_ids.length) products = args.produto_ids.map(id => P.find(p => p.id === id)).filter(Boolean);
-    else if (args.produto_nome) { const p = P.find(p => String(p.title || '').toLowerCase().includes(args.produto_nome.toLowerCase())); if (p) products = [p]; }
-    if (!products.length) throw new Error('Nenhum produto encontrado para gerar texto.');
-    const t = await ai('Voc\u00ea escreve somente a legenda final para redes sociais de afiliados, em portugu\u00eas do Brasil: gancho na primeira linha, 2 a 3 linhas de benef\u00edcio, 3 a 5 hashtags. N\u00e3o invente pre\u00e7o, desconto ou caracter\u00edsticas que n\u00e3o estejam nos dados. Retorne apenas o texto pronto para publicar.', products.map((p, i) => `Produto ${i+1}: ${p.title}\nPre\u00e7o: ${brl(p.price)}${p.oldPrice ? ' (de ' + brl(p.oldPrice) + ')' : ''}\nCategoria: ${p.category || ''}\nLink: ${p.url || ''}`).join('\n\n'), 700, products[0].projectId || '');
-    return { texto: t, produtos: products.map(p => ({ id: p.id, title: p.title, price: p.price })) };
-  }
-});
-
-/* ---------- Task tools ---------- */
-registerTool('create_task', {
-  name: 'create_task',
-  description: 'Cria uma tarefa (task) em um projeto.',
-  parameters: { type: 'object', properties: { projeto: { type: 'string', description: 'ID do projeto (opcional, usa o primeiro dispon\u00edvel).' }, titulo: { type: 'string', description: 'T\u00edtulo da tarefa.' }, tipo: { type: 'string', enum: ['post', 'stage', 'general'], description: 'Tipo da tarefa.' }, data: { type: 'string', description: 'Data da tarefa (YYYY-MM-DD, default hoje).' } }, required: ['titulo'] },
-  requiresAuth: false, category: 'tasks',
-  async execute(args) {
-    const p = proj(args.projeto) || myProjects()[0];
-    if (!p) throw new Error('Projeto n\u00e3o encontrado.');
-    const t = { id: uid(), date: args.data || today(), done: false, createdBy: me?.id || null, key: `chat:${Date.now()}`, projectId: p.id, title: args.titulo, kind: args.tipo || 'general' };
-    S.tasks.push(t); save(); audit('task.created', 'task', t.id, { title: args.titulo, projectId: p.id }); render();
-    return { success: true, taskId: t.id, message: `Task "${args.titulo}" criada no projeto ${p.name}.` };
-  }
-});
-
-registerTool('list_tasks', {
-  name: 'list_tasks',
-  description: 'Lista tarefas de hoje ou de um projeto espec\u00edfico.',
-  parameters: { type: 'object', properties: { projeto: { type: 'string', description: 'ID do projeto (opcional).' }, data: { type: 'string', description: 'Data (YYYY-MM-DD, default hoje).' } }, required: [] },
-  requiresAuth: false, category: 'tasks',
-  async execute(args) {
-    const d = args.data || today();
-    let tasks = S.tasks.filter(t => t.date === d);
-    if (args.projeto) tasks = tasks.filter(t => t.projectId === args.projeto);
-    return { tarefas: tasks.map(t => ({ id: t.id, t\u00edtulo: t.title, done: t.done, projeto: proj(t.projectId)?.name, tipo: t.kind })), total: tasks.length };
-  }
-});
-
-registerTool('update_task', {
-  name: 'update_task',
-  description: 'Marca uma tarefa como conclu\u00edda ou reabre.',
-  parameters: { type: 'object', properties: { task_id: { type: 'string', description: 'ID da tarefa.' }, done: { type: 'boolean', description: 'true para concluir, false para reabrir.' } }, required: ['task_id', 'done'] },
-  requiresAuth: false, category: 'tasks',
-  async execute(args) {
-    const t = S.tasks.find(x => x.id === args.task_id);
-    if (!t) throw new Error('Tarefa n\u00e3o encontrada.');
-    if (!isAdmin() && t.userId !== me.id) throw new Error('Voc\u00ea s\u00f3 pode concluir tarefas atribu\u00eddas a voc\u00ea.');
-    t.done = args.done; t.doneAt = args.done ? Date.now() : null; t.completedBy = args.done ? me.id : null;
-    save(); audit(args.done ? 'task.completed' : 'task.reopened', 'task', t.id, { title: t.title }); render();
-    return { success: true, message: `Task "${t.title}" ${args.done ? 'conclu\u00edda' : 'reaberta'}.` };
-  }
-});
-
-/* ---------- Catalog tools ---------- */
-registerTool('search_catalog', {
-  name: 'search_catalog',
-  description: 'Busca produtos no cat\u00e1logo por termo de busca.',
-  parameters: { type: 'object', properties: { termo: { type: 'string', description: 'Termo de busca (nome do produto).' }, projeto: { type: 'string', description: 'ID do projeto para filtrar (opcional).' }, limite: { type: 'number', description: 'Quantidade m\u00e1xima de resultados (max 50).' } }, required: ['termo'] },
-  requiresAuth: false, category: 'catalogo',
-  async execute(args) {
-    const q = strip(args.termo.trim());
-    if (!q) return { produtos: [], total: 0 };
-    const matches = P.filter(p => (!args.projeto || p.projectId === args.projeto) && strip(p.title || '').includes(q)).slice(0, args.limite || 50);
-    return { produtos: matches.map(p => ({ id: p.id, title: p.title, price: p.price, oldPrice: p.oldPrice, category: p.category, store: p.store, url: p.url, image: p.image, projectId: p.projectId })), total: matches.length };
-  }
-});
-
-registerTool('get_cheapest_product', {
-  name: 'get_cheapest_product',
-  description: 'Encontra o produto mais barato do cat\u00e1logo, opcionalmente filtrado por categoria.',
-  parameters: { type: 'object', properties: { categoria: { type: 'string', description: 'Categoria para filtrar (opcional).' }, projeto: { type: 'string', description: 'ID do projeto para filtrar (opcional).' } }, required: [] },
-  requiresAuth: false, category: 'catalogo',
-  async execute(args) {
-    let pool = P.filter(p => p.price && parseFloat(String(p.price).replace(/[^\d,]/g, '').replace(',', '.')) > 0);
-    if (args.categoria) pool = pool.filter(p => p.category === args.categoria);
-    if (args.projeto) pool = pool.filter(p => p.projectId === args.projeto);
-    if (!pool.length) throw new Error('Nenhum produto com pre\u00e7o v\u00e1lido encontrado.');
-    pool.sort((a, b) => parseFloat(String(a.price).replace(/[^\d,]/g, '').replace(',', '.')) - parseFloat(String(b.price).replace(/[^\d,]/g, '').replace(',', '.')));
-    const p = pool[0];
-    return { produto: { id: p.id, title: p.title, price: p.price, category: p.category, projectId: p.projectId } };
-  }
-});
-
-registerTool('import_catalog', {
-  name: 'import_catalog',
-  description: 'Importa produtos de um arquivo CSV/JSON para o cat\u00e1logo de um projeto.',
-  parameters: { type: 'object', properties: { projeto: { type: 'string', description: 'ID do projeto destino.' }, arquivo_nome: { type: 'string', description: 'Nome do arquivo.' }, arquivo_dados: { type: 'string', description: 'Dados base64 do arquivo CSV/JSON.' } }, required: ['projeto', 'arquivo_nome', 'arquivo_dados'] },
-  requiresAuth: true, requiresAdmin: true, category: 'catalogo',
-  async execute(args) {
-    if (!isAdmin()) throw new Error('Apenas administradores podem importar cat\u00e1logos.');
-    if (!args.arquivo_dados) throw new Error('Nenhum arquivo fornecido.');
-    const bin = atob(args.arquivo_dados); const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const texto = new TextDecoder().decode(bytes);
-    let rows;
-    if (args.arquivo_nome.toLowerCase().endsWith('.csv')) {
-      const d = (texto.split('\n')[0].match(/;/g) || []).length > (texto.split('\n')[0].match(/,/g) || []).length ? ';' : ',';
-      const lines = texto.split('\n'); const header = lines[0].split(d).map(h => h.trim());
-      rows = lines.slice(1).filter(l => l.trim()).map(l => { const vals = l.split(d); const obj = {}; header.forEach((h, i) => obj[h] = vals[i]); return obj; });
-    } else { const j = JSON.parse(texto); rows = Array.isArray(j) ? j : j.products || []; }
-    const merged = rows.map(normProduct).filter(Boolean);
-    const seen = new Set();
-    const imported = merged.map(p => ({...p, projectId: args.projeto || p.projectId || ''})).filter(p => seen.has(p.id) ? false : (seen.add(p.id), true));
-    P = [...P.filter(p => p.projectId !== args.projeto), ...imported]; IDX.clear(); await saveProducts();
-    return { success: true, importados: imported.length, projeto: args.projeto };
-  }
-});
-
-/* ---------- Attendance tools ---------- */
-registerTool('toggle_whatsapp_service', {
-  name: 'toggle_whatsapp_service',
-  description: 'Liga ou desliga o atendimento autom\u00e1tico do WhatsApp.',
-  parameters: { type: 'object', properties: { ligar: { type: 'boolean', description: 'true para ligar, false para desligar.' } }, required: ['ligar'] },
-  requiresAuth: false, category: 'atendimento',
-  async execute(args) {
-    att.net = 'whatsapp'; att.watching = args.ligar === true; render();
-    if (args.ligar) { const r = await callNet('whatsapp', { type: 'CHAT_WATCH', on: true }); if (!r?.ok) throw new Error(r?.error || 'N\u00e3o foi poss\u00edvel ligar o monitor.'); toast('Atendimento autom\u00e1tico WhatsApp ligado.'); } else { toast('Atendimento autom\u00e1tico WhatsApp desligado.'); }
-    return { success: true, rede: 'whatsapp', ligado: args.ligar };
-  }
-});
-
-registerTool('toggle_telegram_service', {
-  name: 'toggle_telegram_service',
-  description: 'Liga ou desliga o atendimento autom\u00e1tico do Telegram.',
-  parameters: { type: 'object', properties: { ligar: { type: 'boolean', description: 'true para ligar, false para desligar.' } }, required: ['ligar'] },
-  requiresAuth: false, category: 'atendimento',
-  async execute(args) {
-    att.net = 'telegram'; att.watching = args.ligar === true; render();
-    if (args.ligar) { const r = await callNet('telegram', { type: 'CHAT_WATCH', on: true }); if (!r?.ok) throw new Error(r?.error || 'N\u00e3o foi poss\u00edvel ligar o monitor.'); toast('Atendimento autom\u00e1tico Telegram ligado.'); } else { toast('Atendimento autom\u00e1tico Telegram desligado.'); }
-    return { success: true, rede: 'telegram', ligado: args.ligar };
-  }
-});
-
-registerTool('get_social_accounts_status', {
-  name: 'get_social_accounts_status',
-  description: 'Verifica o status das contas de redes sociais configuradas.',
-  parameters: { type: 'object', properties: {}, required: [] },
-  requiresAuth: false, category: 'atendimento',
-  async execute() {
-    const p = myProjects()[0];
-    if (!p) return { contas: [], mensagem: 'Nenhum projeto encontrado.' };
-    return { contas: (p.accounts || []).map(a => ({ tipo: a.type, label: a.label, itens: (a.items || '').split('\n').filter(Boolean).length })), total: (p.accounts || []).length };
-  }
-});
-
-/* ---------- Project tools ---------- */
-registerTool('list_projects', {
-  name: 'list_projects',
-  description: 'Lista projetos cadastrados na Vizzion.',
-  parameters: { type: 'object', properties: {}, required: [] },
-  requiresAuth: false, category: 'projetos',
-  async execute() {
-    return { projetos: myProjects().map(p => ({ id: p.id, nome: p.name, bio: p.bio, dailyPosts: p.dailyPosts, tasksPerDay: p.tasksPerDay })), total: myProjects().length };
-  }
-});
-
-registerTool('get_project_products', {
-  name: 'get_project_products',
-  description: 'Lista produtos de um projeto espec\u00edfico no cat\u00e1logo.',
-  parameters: { type: 'object', properties: { projeto: { type: 'string', description: 'ID do projeto.' }, limite: { type: 'number', description: 'Quantidade m\u00e1xima (max 50).' } }, required: ['projeto'] },
-  requiresAuth: false, category: 'projetos',
-  async execute(args) {
-    const items = P.filter(p => p.projectId === args.projeto).slice(0, args.limite || 50);
-    return { produtos: items.map(p => ({ id: p.id, title: p.title, price: p.price, category: p.category, image: p.image })), total: items.length };
-  }
-});
-
 const offerCard = (p, extra = '', showProjectLogo = false) => { const project = proj(p.projectId); return `<div class="offer">${showProjectLogo ? (project?.logo ? `<img class="offer-project-logo" src="${esc(project.logo)}" alt="Logo do projeto" title="Identidade visual do projeto">` : `<span class="offer-project-logo offer-project-placeholder" title="Projeto sem logo cadastrado">${esc((project?.name || 'V').slice(0,1).toUpperCase())}</span>`) : ''}${p.image ? `<img src="${esc(p.image)}" alt="Foto de ${esc(p.title)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.outerHTML='<div class=&quot;offer-placeholder&quot;>Imagem indisponível</div>'">` : '<div class="offer-placeholder">Sem foto</div>'}<div class="grow"><b>${esc(p.title)}</b><div>${brl(p.price)} ${p.oldPrice ? `<s class="muted">${brl(p.oldPrice)}</s> <span class="tag ok">${pct(p)}% OFF</span>` : ''} ${p.store ? `<span class="tag">${esc(p.store)}</span>` : ''}</div></div>${extra}</div>`; };
 
 function taskRow(t) {
@@ -934,7 +629,7 @@ function sidebar() {
   return `<aside><div class="brand-lockup"><img class="brand-logo" src="vizzion-logo.png" alt="Vizzion"><div class="brand-copy"><h1>VIZZION</h1><small>OPEN WAYS · EMBRACE THE WORLD</small></div></div><div class="who">${esc(me.name || me.email || 'Integrante')} · equipe · <a data-act="logout">sair</a></div>
   <div class="nav-h">Interações nas abas abertas</div><div class="interaction-counts">${['instagram','facebook','tiktok','youtube'].map(n=>`<div class="interaction-count"><span>${({instagram:'◎',facebook:'f',tiktok:'♪',youtube:'▶'})[n]} ${NETS[n].name}</span><b data-notification-count="${n}">${notificationCounts[n] == null ? '—' : notificationCounts[n] > 0 ? notificationCounts[n] : '0'}</b></div>`).join('')}<button class="btn ghost" data-act="refreshNotificationCounts">Atualizar contadores</button><small class="muted" data-notification-count-updated>${notificationCountsUpdatedAt ? 'Atualizado '+new Date(notificationCountsUpdatedAt).toLocaleTimeString('pt-BR') : 'Abra as redes na mesma janela do Chrome.'}</small></div>
   ${navBtn('hoje', 'Início', pendingTasks)}${navBtn('agencia', 'Projetos')}${myProjects().map((p) => navBtn('proj:' + p.id, '↳ ' + esc(p.name))).join('')}
-  ${navBtn('atendimento', 'Atendimento')}${navBtn('publicar', 'Publicar')}${navBtn('biblioteca', 'Biblioteca')}${navBtn('chat', 'Chat')}${navBtn('usuarios', 'Equipe')}${navBtn('config', 'Configurações')}
+  ${navBtn('atendimento', 'Atendimento')}${navBtn('publicar', 'Publicar')}${navBtn('biblioteca', 'Biblioteca')}${navBtn('usuarios', 'Equipe')}${navBtn('config', 'Configurações')}
   </aside>`;
 }
 
@@ -956,6 +651,7 @@ function viewHoje() {
   const taskDone = mine.filter((t) => t.done).length;
   const taskPercent = taskTotal ? Math.round((taskDone / taskTotal) * 100) : 0;
   return `<h2>Hoje, ${new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })}</h2><p class="sub">Suas tasks do dia e as ofertas sugeridas pela base de produtos.</p>
+  <section><h3>Recados da equipe</h3><div class="general-chat">${generalMessages().map((m) => `<div class="general-message"><div class="row"><b class="grow">${esc(m.authorName || 'Integrante')}</b><span class="muted">${m.createdAt ? new Date(m.createdAt).toLocaleString('pt-BR') : 'recado anterior'}</span></div><div>${esc(m.text)}</div></div>`).join('') || '<p class="muted">Nenhum recado ainda.</p>'}</div><div class="row general-chat-compose"><textarea id="general-message-input" class="grow" placeholder="Escreva um recado para toda a equipe..." rows="2"></textarea><button class="btn" data-act="sendGeneralMessage">Enviar recado</button></div><p class="muted">Os recados ficam compartilhados com a equipe e são sincronizados com o backend.</p></section>
   <section><div class="row"><h3 class="grow">Minhas tasks</h3><button class="btn ghost" data-act="genTasks">Gerar tasks de hoje</button></div>
   ${mine.map(taskRow).join('') || '<p class="muted">Nenhuma task para hoje. As tasks serão geradas automaticamente à meia-noite.</p>'}</section>
   ${others.length ? `<section><h3>Tasks da equipe</h3>${others.map(taskRow).join('')}</section>` : ''}
@@ -1016,7 +712,7 @@ function viewPublicar() {
   <textarea data-pub="text" placeholder="Corpo do post: legenda, hashtags, link…" style="min-height:130px">${esc(pub.text)}</textarea>
   <div class="row"><div class="grow product-search-wrap"><input id="pub-product-search" class="grow" autocomplete="off" placeholder="Gerar texto a partir de produtos: digite o nome…" value=""><div id="pub-product-results" class="live-results"></div></div><button class="btn ghost" data-act="genPostText" ${pub.productIds?.length || pub.productId ? '' : 'disabled'}>Sugerir texto com IA</button></div>
   <div id="selected-publish-products">${renderSelectedPublishProducts()}</div>
-  <div class="row">${POST_NETS.filter(n => pub.productImages || pub.mediaType !== 'photo' || n !== 'youtube').map((n) => n === 'facebook' ? `<div class="facebook-publish-choice"><div class="facebook-publish-title"><span>f</span><b>Facebook</b></div><label><input type="checkbox" data-act="pubFacebookDestination" data-destination="feed" ${pub.facebookDestinations.feed?'checked':''}> Feed</label><label><input type="checkbox" data-act="pubFacebookDestination" data-destination="marketplace" ${pub.facebookDestinations.marketplace?'checked':''}> Marketplace</label></div>` : `<button type="button" class="social-toggle ${pub.nets[n] ? 'selected' : ''} net-${n}" data-act="pubNetButton" data-net="${n}" aria-pressed="${!!pub.nets[n]}" title="${NETS[n].name}"><span>${({instagram:'◎',tiktok:'♪',youtube:'▶',linkedin:'in',x:'𝕝'})[n] || NETS[n].name.slice(0,2)}</span><small>${NETS[n].name}</small></button>`).join('')}<div class="network-status">${pub.facebookDestinations.feed?'<span class="tag">Facebook · Feed</span>':''}${pub.facebookDestinations.marketplace?'<span class="tag">Facebook · Marketplace</span>':''} ${POST_NETS.filter(n=>n!=='facebook'&&pub.nets[n]).map(n=>`<span class="tag">${NETS[n].name}</span>`).join(' ')} ${POST_NETS.map(st).join(' ')}</div></div>
+  <div class="row">${POST_NETS.filter(n => pub.productImages || pub.mediaType !== 'photo' || n !== 'youtube').map((n) => n === 'facebook' ? `<div class="facebook-publish-choice"><div class="facebook-publish-title"><span>f</span><b>Facebook</b></div><label><input type="checkbox" data-act="pubFacebookDestination" data-destination="feed" ${pub.facebookDestinations.feed?'checked':''}> Feed</label><label><input type="checkbox" data-act="pubFacebookDestination" data-destination="marketplace" ${pub.facebookDestinations.marketplace?'checked':''}> Marketplace</label></div>` : `<button type="button" class="social-toggle ${pub.nets[n] ? 'selected' : ''} net-${n}" data-act="pubNetButton" data-net="${n}" aria-pressed="${!!pub.nets[n]}" title="${NETS[n].name}"><span>${({instagram:'◎',tiktok:'♪',youtube:'▶',linkedin:'in',x:'𝕏'})[n] || NETS[n].name.slice(0,2)}</span><small>${NETS[n].name}</small></button>`).join('')}<div class="network-status">${pub.facebookDestinations.feed?'<span class="tag">Facebook · Feed</span>':''}${pub.facebookDestinations.marketplace?'<span class="tag">Facebook · Marketplace</span>':''} ${POST_NETS.filter(n=>n!=='facebook'&&pub.nets[n]).map(n=>`<span class="tag">${NETS[n].name}</span>`).join(' ')} ${POST_NETS.map(st).join(' ')}</div></div>
   ${pub.facebookDestinations.marketplace ? `<section><h3>Facebook Marketplace</h3><div class="row"><label>Localização <input data-pub="marketplaceLocation" value="${esc(pub.marketplaceLocation)}"></label><label>Grupos <input data-pub="marketplaceGroups" type="number" min="0" max="10" value="${pub.marketplaceGroups}"></label><label><input data-pub="marketplaceDelivery" type="checkbox" ${pub.marketplaceDelivery?'checked':''}> Entrega disponível</label></div><p class="muted">O anúncio será preenchido com o primeiro produto selecionado/encontrado, condição Novo e descrição sem links de afiliado.</p></section>` : ''}
   <section class="schedule-box"><h3>Quando publicar?</h3><label class="row"><input type="checkbox" data-pub="postNow" ${pub.postNow?'checked':''}> Postar agora</label><div class="row"><label>Data <input type="date" data-pub="scheduleDate" value="${esc(pub.scheduleDate || today())}" min="${today()}" ${pub.postNow?'disabled':''}></label><label>Horário <input type="time" data-pub="scheduleTime" value="${esc(pub.scheduleTime || '12:00')}" ${pub.postNow?'disabled':''}></label></div><p class="muted">Desmarque “Postar agora” para salvar a mídia, os textos e as redes selecionadas na fila. No horário, a Vizzion chamará o mesmo fluxo de publicação existente.</p></section>
   <div class="row"><button class="btn" data-act="submitPublish">${pub.postNow ? (pub.autoPost?'Publicar automaticamente agora':'Preparar nas abas agora') : 'Agendar publicação'}</button>${Object.keys(pub.status).length ? '<button class="btn ghost" data-act="markPublished">Já publiquei (conta como 1 post)</button>' : ''}</div></section>
@@ -1166,72 +862,15 @@ function viewConfig() {
   <section><h3>Bot e tasks</h3>${f('autoMaxPerHour', 'Limite de respostas automáticas por hora', 'number')}${f('botPhotosMax', 'Fotos de produtos por resposta automática (0 = não enviar)', 'number')}${f('stagesPerDay', 'Etapas por projeto nas tasks do dia', 'number')}</section>
   <section><h3>Catálogo no banco de dados</h3><p class="muted">Apaga todos os produtos da tabela compartilhada no backend e limpa o catálogo deste navegador. Use quando quiser começar do zero após importar planilhas antigas. Essa ação não pode ser desfeita; exporte um backup antes.</p><button class="btn danger" data-act="clearAllCatalogDatabase">Excluir todos os catálogos do banco de dados</button></section>
   <section><h3>Conector MCP</h3><p class="muted">Conecte um servidor MCP local ou remoto para compartilhar contexto e ferramentas com uma IA compatível. O token fica somente neste navegador.</p><div class="grid2">${f('mcpUrl', 'URL do servidor MCP', 'url', 'http://127.0.0.1:8787')}<label class="row"><span style="width:240px">Token MCP</span><input class="grow" data-path="s|mcpToken" type="password" value="${esc(S.settings.mcpToken || '')}" placeholder="Bearer token do servidor"></label></div><textarea id="mcp-context-text" placeholder="Texto de teste para enviar ao MCP" style="min-height:90px"></textarea><div class="row"><button class="btn ghost" data-act="grantMcp">Autorizar conexão</button><button class="btn ghost" data-act="testMcp">Testar conexão</button><button class="btn" data-act="sendMcpContext">Enviar contexto</button></div></section>
-  <section><h3>IA Gemini (chat do painel)</h3><p class="muted">Configure a chave da Google AI Studio para a IA responder no canal IA · Migoo do Chat. Fica salva somente neste navegador.</p>${f('geminiKey', 'Chave Gemini', 'password', 'AIza...')}${f('geminiModel', 'Modelo', 'text', 'gemini-3.5-flash-lite')}<div class="row"><button class="btn ghost" data-act="testGeminiKey">Testar chave Gemini</button></div></section>
   <section><h3>Equipe e sincronização</h3><p class="muted">Conexão com o backend Vizzion configurada automaticamente.</p><div class="row"><button class="btn ghost" data-act="pull">Baixar da equipe</button><button class="btn ghost" data-act="push">Enviar para a equipe</button><button class="btn ghost" data-act="logout">Sair da conta</button></div></section>
   <section><h3>Backup</h3><div class="row"><button class="btn ghost" data-act="export">Exportar dados (JSON)</button><input type="file" data-act="import" accept=".json"></div></section>`;
-}
-
-function viewChat() {
-  const channel = S.chat.channels.find((c) => c.id === routeChat) || S.chat.channels[0];
-  const isIA = channel?.type === 'ia';
-  const chatCanal = route === 'chat-direct-gemini' ? 'gemini-direct' : (channel?.id || 'geral');
-  const msgs = S.chat.messages.filter((m) => m.channelId === chatCanal).slice(-100);
-  const meName = me?.name || me?.email || 'Você';
-  const mcpStatus = mcpConectado ? '<span class="status-badge ok">◝ MCP ativo</span>' : '<span class="status-badge off">◝ MCP inativo</span>';
-  const geminiStatus = isGeminiConectado() ? '<span class="status-badge ok">◝ Gemini ativo</span>' : '<span class="status-badge off">◝ Gemini inativo</span>';
-  return `<div class="chat-view">
-    <div class="chat-sidebar">
-      <h3>Canais</h3>
-      <div class="chat-channel-row"><a class="chat-channel ${route === 'chat-direct-gemini' ? 'on' : ''}" href="javascript:;" data-act="chatDirectGemini"><span class="dot"></span><span class="name">Direct Gemini</span>${isGeminiConectado() ? '<span class="ia-tag">Conectado</span>' : '<span class="ia-tag off">Desconectado</span>'}</a></div>
-      <div class="chat-channel-row"><a class="chat-channel ${isIA && route === 'chat' ? 'on' : ''}" href="javascript:;" data-act="chatChannel" data-cid="${esc(channel?.id || 'geral')}"><span class="dot"></span><span class="name">${esc(channel?.name || 'Geral')}</span>${isIA ? '<span class="ia-tag">Migoo · IA</span>' : ''}</a></div>
-      ${S.chat.channels.map((c) => {
-        if (c.id === (channel?.id || 'geral')) return '';
-        const active = c.id === (routeChat || 'geral');
-        const canDelete = c.id !== 'geral';
-        return `<div class="chat-channel-row"><a class="chat-channel ${active ? 'on' : ''}" href="javascript:;" data-act="chatChannel" data-cid="${esc(c.id)}"><span class="dot"></span><span class="name">${esc(c.name)}</span>${c.type === 'ia' ? '<span class="ia-tag">IA</span>' : ''}</a>${canDelete ? `<button class="chat-del" data-act="chatDelChannel" data-cid="${esc(c.id)}" title="Excluir canal">✕</button>` : ''}</div>`;
-      }).join('')}
-      <div class="chat-new" data-act="chatNewChannel">+ Novo canal</div>
-      <div class="chat-status"><div class="status-row"><span>MCP:</span>${mcpStatus}</div><div class="status-row"><span>Gemini:</span>${geminiStatus}</div></div>
-    </div>
-    <div class="chat-main">
-      <div class="chat-header">
-        <h2>${route === 'chat-direct-gemini' ? 'Direct Gemini' : esc(channel?.name || 'Geral')}${isIA ? ' <span class="ia-tag">IA · Migoo</span>' : ''}</h2>
-        <p>${route === 'chat-direct-gemini' ? `IA direta via chave Gemini ${isGeminiConectado() ? '— conectada' : '— configure a chave em Configurações'}` : isIA ? 'Converse com a IA via servidor MCP configurado em Configurações.' : 'Mensagens compartilhadas com a equipe.'}</p>
-      </div>
-      <div class="chat-messages" id="chat-msgs">
-        ${msgs.length ? msgs.map((m) => {
-          const isMe = m.authorId === me?.id;
-          const ai = m.ai ? ' <span class="ia-tag">IA</span>' : '';
-          const anexosHtml = Array.isArray(m.anexos) && m.anexos.length ? `<div class="msg-attach">${m.anexos.map(a => {
-            if (a.tipo.startsWith('image/')) return `<img src="${esc(a.dados)}" alt="${esc(a.nome)}">`;
-            if (a.tipo.startsWith('video/')) return `<video src="${esc(a.dados)}" alt="${esc(a.nome)}" controls></video>`;
-            return `<div class="file">📎 <b>${esc(a.nome)}</b><span>(${a.tipo})</span></div>`;
-          }).join('')}</div>` : '';
-          return `<div class="chat-msg ${isMe ? 'me' : ''}"><div class="bubble">${esc(m.text)}${ai}${anexosHtml}</div><div class="who">${esc(m.authorName || 'Integrante')}${ai}</div><span class="time">${m.createdAt ? new Date(m.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '—'}</span></div>`;
-        }).join('') : '<div class="chat-empty">Nenhuma mensagem ainda.</div>'}
-        <div id="chat-typing" class="chat-typing"></div>
-      </div>
-      <div class="chat-actions">
-        <button class="btn ghost small" data-act="chatLimparHistorico">🗑︝ Limpar chat</button>
-      </div>
-      <div class="chat-compose">
-        ${chatAnexos.length ? `<div class="chat-anexos">${chatAnexos.map((a,i)=>`<span class="tag">${esc(a.name)} <button class="x" data-act="chatRemoverAnexo" data-index="${i}">✕</button></span>`).join('')}<button class="btn ghost small" data-act="chatLimparAnexos">Limpar anexos</button></div>` : ''}
-        <textarea id="chat-input" class="grow" placeholder="${route === 'chat-direct-gemini' ? 'Escreva para o Gemini…' : isIA ? 'Escreva para a IA… (clique no clip para anexar foto/video/planilha)' : 'Escreva uma mensagem…'}" rows="1"></textarea>
-        <input type="file" id="chat-anexo-file" data-act="chatAnexar" style="display:none" multiple accept="image/*,video/*,.csv,.json,.txt,.application/vnd.ms-excel,.application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
-        <button class="btn ghost" data-act="chatAnexar">📎</button>
-        <button class="btn" data-act="${route === 'chat-direct-gemini' ? 'chatAskGeminiDirect' : 'chatSend'}">Enviar</button>
-        ${isIA ? `<button class="btn chat-btn-ia" data-act="chatAskIA">Perguntar à IA</button>` : route === 'chat-direct-gemini' ? `<button class="btn chat-btn-ia" data-act="chatAskGeminiDirect">Perguntar ao Gemini</button>` : ''}
-      </div>
-    </div>
-  </div>`;
 }
 
 function render() {
   const y = window.scrollY, root = $('#root');
   if (!AUTH || !me) { root.innerHTML = viewLogin(); return; }
-  const views = { hoje: viewHoje, 'chat-direct-gemini': viewChat, agencia: viewAgencia, usuarios: viewUsuarios, historico: viewHistorico, biblioteca: viewBiblioteca, ferramentas: viewFerramentas, publicar: viewPublicar, atendimento: viewAtendimento, ofertas: viewOfertas, catalogo: viewCatalogo, config: viewConfig, chat: viewChat };
+  const views = { hoje: viewHoje, agencia: viewAgencia, usuarios: viewUsuarios, historico: viewHistorico, biblioteca: viewBiblioteca, ferramentas: viewFerramentas, publicar: viewPublicar, atendimento: viewAtendimento, ofertas: viewOfertas, catalogo: viewCatalogo, config: viewConfig };
   
-  if (route === 'chat' && !S.chat.channels.find((c) => c.id === routeChat)) routeChat = S.chat.channels[0]?.id || 'geral';
   const v = route.startsWith('proj:') ? viewProjeto(route.slice(5)) : route.startsWith('ferramentas:') ? viewFerramentas() : route.startsWith('catalogo:') ? viewCatalogo() : (views[route] || viewHoje)();
   root.innerHTML = sidebar() + `<main>${v}</main>`;
   decorateVitrineMarketplaceButtons();
@@ -1270,349 +909,6 @@ async function mcpCallTool(name, argumentsValue) {
   const result = await mcpJsonRequest({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name, arguments: argumentsValue } }, initialized.sessionId);
   if (result.data.error) throw new Error(result.data.error.message || 'MCP rejeitou a ferramenta.');
   return result.data.result || result.data;
-}
-
-async function askGeminiDirect(text, model, apiKey, anexos = []) {
-  const systemInstruction = 'Voce é a assistente de IA do painel Vizzion Centro de Comando. Responda em portugues do Brasil, de forma objetiva e curta.';
-  const userParts = [];
-  if (anexos && anexos.length) {
-    for (const a of anexos) {
-      if (a.tipo.startsWith('image/') || a.tipo.startsWith('video/')) {
-        userParts.push({ inlineData: { mimeType: a.tipo, data: a.dados.split(',')[1] || a.dados } });
-        userParts.push({ text: `[Anexo: ${a.nome} (${a.tipo})]` });
-      } else if (a.tipo.includes('csv') || a.tipo.includes('json') || a.tipo.includes('spreadsheet') || a.tipo === 'text/plain') {
-        try {
-          const bin = atob(a.dados.split(',')[1] || a.dados);
-          const bytes = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-          const conteudo = new TextDecoder().decode(bytes);
-          userParts.push({ text: `[Anexo: ${a.nome} (${a.tipo})]\n${conteudo.slice(0, 6000)}` });
-        } catch { userParts.push({ text: `[Anexo: ${a.nome} (${a.tipo}) - nao foi possivel ler]` }); }
-      } else {
-        userParts.push({ text: `[Anexo: ${a.nome} (${a.tipo})]` });
-      }
-    }
-  }
-  userParts.push({ text });
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemInstruction }] },
-      contents: [{ role: 'user', parts: userParts }],
-      generationConfig: { maxOutputTokens: 1200, temperature: 0.7 }
-    })
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const status = Number(response.status);
-    const errorCode = String(result?.error?.status || '').slice(0, 80);
-    throw new Error(`Gemini (HTTP ${status}): ${errorCode || 'falha na requisicao.'}`);
-  }
-  const out = (result?.candidates?.[0]?.content?.parts || []).map((part) => part?.text || '').join('').trim();
-  if (!out) throw new Error('A Gemini nao retornou conteúdo.');
-  return out;
-}
-
-function interpretarComandoLocal(text, anexos) {
-  const t = text.trim();
-  const tl = t.toLowerCase();
-  // Criar task
-  const mTask = tl.match(/crie(?: uma)? task(?: (?:no|em|para) o? projeto\s+(.+))?\s+['"](.+)['"]/i) || tl.match(/crie(?: uma)? task\s+['"](.+)['"]/i);
-  if (mTask) {
-    const projeto = mTask[1] ? mTask[1].trim() : '';
-    const titulo = mTask[mTask.length - 1].trim();
-    return { nome: 'criar_task', args: { projeto, titulo, tipo: 'general', data: today() }, resposta: `Task "${titulo}" criada${projeto ? ' no projeto ' + projeto : ''}.` };
-  }
-  const mTask2 = tl.match(/nova task['"]?\s*['"](.+)['"]/i);
-  if (mTask2) {
-    return { nome: 'criar_task', args: { projeto: '', titulo: mTask2[1].trim(), tipo: 'general', data: today() }, resposta: `Task "${mTask2[1].trim()}" criada.` };
-  }
-  // Alternar atendimento
-  if (tl.match(/(ativa|ligue|ligar)\s+(o\s+)?atendimento/)) {
-    const rede = tl.includes('telegram') ? 'telegram' : 'whatsapp';
-    return { nome: 'alternar_atendimento', args: { rede, ligar: true, projeto: '' }, resposta: `Atendimento automático ${rede} ligado.` };
-  }
-  if (tl.match(/(desliga|desligue|desligar)\s+(o\s+)?atendimento/)) {
-    const rede = tl.includes('telegram') ? 'telegram' : 'whatsapp';
-    return { nome: 'alternar_atendimento', args: { rede, ligar: false, projeto: '' }, resposta: `Atendimento automático ${rede} desligado.` };
-  }
-  // Detectar redes mencionadas
-  const redes = [];
-  if (tl.match(/\bfacebook\b/)) redes.push('facebook');
-  if (tl.match(/\binstagram\b/)) redes.push('instagram');
-  if (tl.match(/\btiktok\b/)) redes.push('tiktok');
-  if (tl.match(/\byoutube\b/)) redes.push('youtube');
-  if (!redes.length && tl.match(/\b(facebook|instagram|tiktok|youtube)\b/)) redes.push(tl.match(/\b(facebook|instagram|tiktok|youtube)\b/)[1]);
-  // Extrair texto entre aspas como legenda
-  const aspas = t.match(/['"](.+)['"]/);
-  const legendaAspas = aspas ? aspas[1].trim() : '';
-  const textoSemAspas = t.replace(/['"][^'"]*['"]/g, '').trim();
-
-  // Detectar agendamento vs publicar agora
-  const ehAgendamento = tl.match(/\b(agende|agendar|agendado|amanh|as\s+\d{1,2}:\d{2}|\d{1,2}:\d{2})/i);
-  const ehPublicarAgora = tl.match(/\b(poste|publica|publicar|publique|postar|agora|envie|mande)\b/i) && !ehAgendamento;
-
-  // Extrair produto mencionado ou faixa de preço ou mais barato ou produto genérico
-  let produtoNome = null;
-  let produtoFaixaMin = null;
-  let produtoFaixaMax = null;
-  let produtoGenerico = false;
-  // Nome de produto: apenas se for curto (máx 40 chars) e não contiver palavras de comando
-  const mProdNome = tl.match(/(?:produto|item|celular|smartphone|moto|iphone|samsung|xiaomi)\s+([a-zà-ú0-9 .\-]{2,40}?)(?:\s+(?:no|na|entre|de|\$|R\$|reais|real|no|na|do|da|com|para|por|em|agora|hoje|amanh))?\s*$/i);
-  if (mProdNome) {
-    const candidatoNome = mProdNome[1].trim();
-    // Rejeitar se o "nome" capturado for na verdade uma frase de comando
-    if (!/^(mais|menos|um|uma|qualquer|o|a|os|as)\s/i.test(candidatoNome) &&
-        !/\b(mais|menos)\s+(barato|caro)\b/i.test(candidatoNome) &&
-        !/\b(menor|maior)\s+pre[c�]o\b/i.test(candidatoNome) &&
-        candidatoNome.length <= 40) {
-      produtoNome = candidatoNome;
-    } else if (/\b(mais|menos)\s+(barato|caro)\b/i.test(candidatoNome) || /\b(menor|maior)\s+pre[c�]o\b/i.test(candidatoNome)) {
-      const mMarca = candidatoNome.match(/^([a-z�-�0-9 .\-]{2,20}?)\s+(mais|menos)\s+(barato|caro)|^([a-z�-�0-9 .\-]{2,20}?)\s+(menor|maior)\s+pre[c�]o/i);
-      if (mMarca) {
-        const marca = (mMarca[1] || mMarca[4]).trim();
-        if (marca.length >= 2 && marca.length <= 20) produtoNome = marca;
-      }
-    }
-  }
-  // Detectar produto genérico (qualquer celular, um celular, etc)
-  if (tl.match(/\b(qualquer\s+)?(celular|smartphone|produto|item)\b/i)) produtoGenerico = true;
-  const mFaixa = tl.match(/entre\s+([\d.,]+)\s+e\s+([\d.,]+)/i);
-  if (mFaixa) { produtoFaixaMin = parseFloat(mFaixa[1].replace(',', '.')); produtoFaixaMax = parseFloat(mFaixa[2].replace(',', '.')); }
-  const mMaisBarato = tl.match(/\b(mais\s+barato|barato|menor\s+preco|menor preço)\b/i);
-  const mMaisCaro = tl.match(/\b(mais\s+caro|caro|maior\s+preco|maior preço)\b/i);
-
-  // Publicar com anexo
-  const querPublicarAnexo = (ehPublicarAgora || ehAgendamento) && redes.length && anexos.length;
-  if (querPublicarAnexo) {
-    const rede = redes[0];
-    const arquivo = anexos[0];
-    const bin = atob(arquivo.dados.split(',')[1] || arquivo.dados);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const legenda = legendaAspas || textoSemAspas.replace(/\b(poste|publica|publicar|postar|mande|envie|essa|esta|a|ela|ele|no|para|pra|com|texto|de|agora|facebook|instagram|tiktok|youtube|marketplace)\b/gi, '').trim() || 'Publicação via IA';
-    // Detectar destino Facebook
-    let facebook_destino = null;
-    if (tl.match(/\bmarketplace\b/)) facebook_destino = 'marketplace';
-    else if (tl.match(/\bfeed\b/)) facebook_destino = 'feed';
-    const args = {
-      texto: legenda,
-      redes: [rede],
-      facebook_destino,
-      arquivo_nome: arquivo.nome,
-      arquivo_tipo: arquivo.tipo,
-      arquivo_dados: arquivo.dados.split(',')[1] || arquivo.dados,
-      automatico: true,
-      agendado: ehAgendamento ? true : undefined,
-      postNow: !ehAgendamento,
-    };
-    if (ehAgendamento) {
-      return { nome: 'publicar_post_agendado', args, resposta: `Publicação agendada para ${rede} com anexo ${arquivo.nome}...` };
-    }
-    return { nome: 'publicar_post', args, resposta: `Publicando "${legenda}" no ${rede}...` };
-  }
-
-  // Publicar produto do catálogo (sem anexo, busca no P)
-  if ((ehPublicarAgora || ehAgendamento) && redes.length && (produtoNome || produtoGenerico || produtoFaixaMin !== null || mMaisBarato || mMaisCaro || legendaAspas)) {
-    const rede = redes[0];
-    let produto = null;
-    // Estratégia 1: nome específico
-    if (produtoNome) {
-      produto = P.find(p => String(p.title || '').toLowerCase().includes(produtoNome.toLowerCase()));
-      if (!produto) return { nome: 'erro_produto', args: {}, resposta: 'N\u00e3o encontrei produto no cat\u00e1logo "' + produtoNome + '".' };
-    }
-    // Estratégia 2: mais caro
-    if (!produto && mMaisCaro) {
-      const candidatos = P.filter(p => parseFloat(String(p.price || '').replace(/[^\d,]/g, '').replace(',', '.')) > 0)
-        .sort((a, b) => {
-          const pa = parseFloat(String(a.price || '').replace(/[^\d,]/g, '').replace(',', '.'));
-          const pb = parseFloat(String(b.price || '').replace(/[^\d,]/g, '').replace(',', '.'));
-          return pb - pa;
-        });
-      produto = candidatos[0] || null;
-    }
-    // Estratégia 3: mais barato
-    if (!produto && mMaisBarato) {
-      const candidatos = P.filter(p => parseFloat(String(p.price || '').replace(/[^\d,]/g, '').replace(',', '.')) > 0)
-        .sort((a, b) => {
-          const pa = parseFloat(String(a.price || '').replace(/[^\d,]/g, '').replace(',', '.'));
-          const pb = parseFloat(String(b.price || '').replace(/[^\d,]/g, '').replace(',', '.'));
-          return pa - pb;
-        });
-      produto = candidatos[0] || null;
-    }
-    // Estratégia 4: faixa de preço
-    if (!produto && produtoFaixaMin !== null && produtoFaixaMax !== null) {
-      const candidatos = P.filter(p => {
-        const preco = parseFloat(String(p.price || '').replace(/[^\d,]/g, '').replace(',', '.'));
-        return preco >= produtoFaixaMin && preco <= produtoFaixaMax;
-      }).sort((a, b) => {
-        const pa = parseFloat(String(a.price || '').replace(/[^\d,]/g, '').replace(',', '.'));
-        const pb = parseFloat(String(b.price || '').replace(/[^\d,]/g, '').replace(',', '.'));
-        return pa - pb;
-      });
-      produto = candidatos[0] || null;
-    }
-    // Estratégia 5: produto genérico (qualquer celular/smartphone/etc)
-    if (!produto && produtoGenerico) {
-      const candidatos = P.filter(p => {
-        const title = String(p.title || '').toLowerCase();
-        return title.includes('celular') || title.includes('smartphone') || title.includes('iphone') || title.includes('samsung') || title.includes('moto') || title.includes('xiaomi');
-      });
-      produto = candidatos[0] || null;
-    }
-    if (!produto) return { nome: 'erro_produto', args: {}, resposta: `Não encontrei produto no catálogo${produtoNome ? ' "' + produtoNome + '"' : ''}${produtoFaixaMin !== null ? ' entre R$ ' + produtoFaixaMin + ' e R$ ' + produtoFaixaMax : ''}.` };
-    const legenda = legendaAspas || `${produto.title} - confira esta oferta!`;
-    // Detectar destino Facebook
-    let facebook_destino = null;
-    if (tl.match(/\bmarketplace\b/)) facebook_destino = 'marketplace';
-    else if (tl.match(/\bfeed\b/)) facebook_destino = 'feed';
-    const args = {
-      texto: legenda,
-      redes: [rede],
-      facebook_destino,
-      produto_id: produto.id,
-      produto_nome: produto.title,
-      produtoImages: !!tl.match(/\b(midia do produto|mídia do produto|imagem do produto|foto do produto)\b/i),
-      automatico: true,
-      agendado: ehAgendamento ? true : undefined,
-      postNow: !ehAgendamento,
-    };
-    if (ehAgendamento) {
-      return { nome: 'publicar_post_agendado', args, resposta: `Publicação agendada: "${legenda}" no ${rede} (produto: ${produto.title})...` };
-    }
-    return { nome: 'publicar_post', args, resposta: `Publicando "${legenda}" no ${rede} (produto: ${produto.title})...` };
-  }
-  return null;
-}
-
-// Função central de preparação da publicação via chat.
-// Recebe args normalizados e preenche o objeto global `pub` de forma consistente.
-// Reutilizada por todos os caminhos: /publicar, interpretarComandoLocal, MCP.
-function prepararPublicacaoChat(args = {}) {
-  // Reset completo do estado de publicação
-  pub.projectId = '';
-  pub.nets = {};
-  pub.text = '';
-  pub.title = '';
-  pub.productId = '';
-  pub.productIds = [];
-  pub.productImages = false;
-  pub.facebookDestinations = { feed: false, marketplace: false };
-  pub.file = null;
-  pub.mediaType = 'photo';
-  pub.autoPost = true;
-  pub.postNow = true;
-  pub.scheduleDate = today();
-  pub.scheduleTime = '12:00';
-  pub.status = {};
-  pub.marketplaceLocation = 'Seropédica - Rio de Janeiro';
-  pub.marketplaceGroups = 10;
-  pub.marketplaceDelivery = true;
-
-  // Redes
-  if (args.redes && Array.isArray(args.redes)) {
-    args.redes.forEach(n => pub.nets[n] = true);
-  }
-
-  // Destino Facebook
-  if (args.facebook_destino === 'marketplace') {
-    pub.facebookDestinations.feed = false;
-    pub.facebookDestinations.marketplace = true;
-  } else if (args.facebook_destino === 'feed') {
-    pub.facebookDestinations.feed = true;
-    pub.facebookDestinations.marketplace = false;
-  } else if (pub.nets.facebook) {
-    // Default para facebook: feed
-    pub.facebookDestinations.feed = true;
-  }
-
-  // T�tulo sempre vazio
-  pub.title = '';
-
-  // Texto / descri��o
-  if (args.texto) {
-    pub.text = args.texto;
-    // Se houver produto, adicionar informa��es no final
-    if (args.produto_id) {
-      const produto = P.find(p => p.id === args.produto_id);
-      if (produto) {
-        pub.projectId = produto.projectId || '';
-        pub.productId = args.produto_id;
-        pub.productIds = [args.produto_id];
-        pub.text += '\n\n?? ' + produto.title + '\n?? por ' + brl(produto.price) + '\n?? ' + (produto.url || '') + '\n_Link de afiliado � pre�o e estoque podem mudar._';
-      }
-    }
-  } else if (args.produto_id) {
-    const produto = P.find(p => p.id === args.produto_id);
-    if (produto) {
-      pub.projectId = produto.projectId || '';
-      pub.productId = args.produto_id;
-      pub.productIds = [args.produto_id];
-      pub.text = '?? ' + produto.title + '\n?? por ' + brl(produto.price) + '\n?? ' + (produto.url || '') + '\n_Link de afiliado � pre�o e estoque podem mudar._';
-    }
-  }
-
-  // Mídia do produto
-  if (args.produtoImages && pub.productIds.length) {
-    pub.productImages = true;
-    pub.mediaType = 'photo';
-    pub.file = null;
-  }
-
-  // Arquivo anexado (base64)
-  if (args.arquivo_dados) {
-    const bin = atob(args.arquivo_dados);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    pub.file = new File([bytes], args.arquivo_nome || 'anexo', { type: args.arquivo_tipo || 'application/octet-stream' });
-    pub.mediaType = pub.file.type.startsWith('image/') ? 'photo' : 'video';
-    pub.productImages = false; // arquivo anexado sobrescreve mídia do produto
-  }
-
-  // Agendamento
-  if (args.agendado) {
-    pub.postNow = false;
-    if (args.schedule_date) pub.scheduleDate = args.schedule_date;
-    if (args.schedule_time) pub.scheduleTime = args.schedule_time;
-  }
-
-  // Modo automático
-  if (args.automatico !== undefined) pub.autoPost = args.automatico;
-  if (args.postNow !== undefined) pub.postNow = args.postNow;
-}
-
-async function executarPublicacaoChat(cmd) {
-  const { nome, args } = cmd;
-  if (nome === 'erro_produto') return args.resposta || 'Erro ao buscar produto.';
-
-  // Preparar pub usando a função central
-  prepararPublicacaoChat(args);
-
-  // Se não tem redes, erro
-  const redesSelecionadas = Object.keys(pub.nets).filter(n => pub.nets[n]);
-  if (!redesSelecionadas.length) return 'Informe ao menos uma rede: facebook, instagram, tiktok ou youtube.';
-
-  // Se é marketplace, precisa de produto
-  if (pub.facebookDestinations.marketplace && !pub.productIds.length) {
-    return 'Para publicar no Facebook Marketplace é necessário selecionar um produto do catálogo.';
-  }
-
-  // Se é publicar agora, executar runPublish
-  if (pub.postNow) {
-    // Abre a aba Publicar para o usuário ver a interface preenchida
-    route = 'publicar';
-    render();
-    await actions.runPublish();
-    return `✅ Publicação executada no painel para ${redesSelecionadas.join(', ')}.`;
-  } else {
-    // Abre a aba Publicar para o usuário ver a interface preenchida
-    route = 'publicar';
-    render();
-    await actions.submitPublish();
-    return `❰ Publicação agendada na fila do painel para ${redesSelecionadas.join(', ')}.`;
-  }
 }
 
 const actions = {
@@ -1671,497 +967,6 @@ const actions = {
       const message = result.content?.find(item => item.type === 'text')?.text || 'Contexto enviado ao MCP.';
       toast(message);
     } catch (error) { toast(`Falha ao enviar contexto: ${error.message || error}`); }
-  },
-  async testGeminiKey() {
-    const key = String(S.settings.geminiKey || '').trim();
-    if (!key) return toast('Informe a chave Gemini.');
-    try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
-        body: JSON.stringify({ contents: [{ parts: [{ text: 'Responda apenas com OK.' }] }], generationConfig: { maxOutputTokens: 8, temperature: 0 } })
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      toast('Chave Gemini válida.');
-    } catch (e) { toast(`Chave Gemini inválida: ${e.message || e}`); }
-  },
-  chatChannel(el) { route = 'chat'; routeChat = el.dataset.cid; render(); },
-  async chatDelChannel(el) {
-    const cid = el.dataset.cid; if (!cid || cid === 'geral') return;
-    if (!confirm('Excluir este canal? As mensagens serão perdidas.')) return;
-    S.chat.channels = S.chat.channels.filter((c) => c.id !== cid);
-    S.chat.messages = S.chat.messages.filter((m) => m.channelId !== cid);
-    if (routeChat === cid) routeChat = S.chat.channels[0]?.id || 'geral';
-    save(); render(); toast('Canal excluído.');
-  },
-  async chatNewChannel() {
-    const name = prompt('Nome do novo canal:', 'Canal'); if (!name || !name.trim()) return;
-    const tipo = prompt('Tipo do canal:\n1 = Usuário (equipe)\n2 = IA · Migoo (MCP)\n3 = Direct Gemini', '1');
-    let channelType = 'user';
-    if (tipo === '2') channelType = 'ia';
-    else if (tipo === '3') channelType = 'gemini';
-    S.chat.channels.push({ id: 'ch-' + uid(), name: name.trim(), type: channelType });
-    save(); render(); toast('Canal criado.');
-  },
-  async chatSend() {
-    const input = $('#chat-input'); const text = String(input?.value || '').trim();
-    const channelId = routeChat || 'geral';
-    const channel = S.chat.channels.find((c) => c.id === channelId);
-    const now = new Date().toISOString();
-    const anexos = chatAnexos.map(a => ({ nome: a.name, tipo: a.type, dados: a.data.split(',')[1] || a.data }));
-    S.chat.messages.push({ id: 'msg-' + uid(), channelId, authorId: me?.id, authorName: me?.name || me?.email || 'Você', text, createdAt: now, anexos: anexos.length ? anexos : undefined });
-    input.value = ''; chatAnexos = []; save(); render();
-    const el = $('#chat-msgs'); if (el) el.scrollTop = el.scrollHeight;
-  },
-  async chatAskIA() {
-    const input = $('#chat-input'); const text = String(input?.value || '').trim();
-    if (!text && !chatAnexos.length) return toast('Digite uma mensagem ou anexe um arquivo para a IA.');
-    if (!mcpConectado) return toast('O MCP não está conectado. Configure a URL do servidor MCP em Configurações e reinicie.');
-    const channelId = routeChat || 'geral';
-    const now = new Date().toISOString();
-    const anexos = chatAnexos.map(a => ({ nome: a.name, tipo: a.type, dados: a.data.split(',')[1] || a.data }));
-    S.chat.messages.push({ id: 'msg-' + uid(), channelId, authorId: me?.id, authorName: me?.name || me?.email || 'Você', text, createdAt: now, anexos: anexos.length ? anexos : undefined });
-    input.value = ''; chatAnexos = []; save(); render();
-    const el = $('#chat-msgs'); if (el) el.scrollTop = el.scrollHeight;
-
-    // Comando /publicar para acionar publicação direta
-    if (/^\/publicar(\s|$)/i.test(text)) {
-      try {
-        await chatExecPublish(text);
-        render();
-        return;
-      } catch (e) {
-        toast('Erro ao publicar: ' + (e.message || e));
-        render();
-        return;
-      }
-    }
-
-    S.chat.messages.push({ id: 'msg-' + uid(), channelId, authorId: 'ia', authorName: 'IA · Migoo', text: '…', createdAt: now, ai: true, typing: true });
-    save(); render();
-    const el2 = $('#chat-msgs'); if (el2) el2.scrollTop = el2.scrollHeight;
-    try {
-      // Ler anexos de catalogo (CSV/JSON) localmente para a IA enxergar o conteudo
-      let anexoTexto = '';
-      for (const a of anexos) {
-        if (a.tipo.includes('csv') || a.tipo.includes('json') || a.tipo.includes('spreadsheet') || a.tipo === 'text/plain') {
-          try {
-            const bin = atob(a.dados);
-            const bytes = new Uint8Array(bin.length);
-            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-            const texto = new TextDecoder().decode(bytes);
-            anexoTexto += `\n\n--- Arquivo: ${a.nome} ---\n${texto.slice(0, 8000)}`;
-          } catch (e) { anexoTexto += `\n\n--- Arquivo: ${a.nome} (erro ao ler) ---`; }
-        }
-      }
-      const mensagemComAnexos = text + anexoTexto;
-
-      let resposta;
-      let acoes = [];
-      const mcpUrl = String(S.settings.mcpUrl || '').trim();
-      const geminiKey = String(S.settings.geminiKey || '').trim();
-      const geminiModel = String(S.settings.geminiModel || 'gemini-3.5-flash-lite').trim();
-      if (mcpUrl) {
-        const result = await mcpCallTool('responder_mensagem', { mensagem: mensagemComAnexos, canal: channelId, supabase_token: AUTH?.access_token || '', anexos });
-        resposta = result.content?.find(item => item.type === 'text')?.text || 'A IA não retornou uma resposta.';
-        acoes = Array.isArray(result.acoes) ? result.acoes : [];
-      } else if (geminiKey) {
-        // Tentar interpretar comando local primeiro (sem depender do MCP)
-        const cmd = interpretarComandoLocal(text, anexos);
-      if (cmd) {
-        let resultado;
-        if (cmd.nome === 'erro_produto') {
-          resultado = cmd.resposta;
-        } else if (cmd.nome.startsWith('publicar_post')) {
-          resultado = await executarPublicacaoChat(cmd);
-        } else if (cmd.nome === 'criar_task' || cmd.nome === 'alternar_atendimento') {
-          resultado = await actions.executarAcaoIA(cmd);
-        } else {
-          await actions.executarAcaoIA(cmd);
-          resultado = cmd.resposta;
-        }
-        const idx = S.chat.messages.findIndex(m => m.ai && m.typing && m.channelId === channelId);
-        if (idx >= 0) { S.chat.messages[idx].text = resultado; delete S.chat.messages[idx].typing; }
-        save(); render();
-        const el3 = $('#chat-msgs'); if (el3) el3.scrollTop = el3.scrollHeight;
-        return;
-      }
-        resposta = await askGeminiDirect(mensagemComAnexos, geminiModel, geminiKey, anexos);
-      } else {
-        throw new Error('Configure a URL do MCP ou a chave Gemini em Configurações.');
-      }
-      // Executa acoes locais que exigem o Chrome/extensao
-      for (const acao of acoes) {
-        try { await executarAcaoIA(acao); } catch (e) { console.warn('acao IA falhou', acao.nome, e); }
-      }
-      const idx = S.chat.messages.findIndex(m => m.ai && m.typing && m.channelId === channelId);
-      let textoFinal = resposta;
-      if (acoes.length) textoFinal += '\n\n' + acoes.map(a => `• ${a.nome}: ${a.resultado}`).join('\n');
-      if (idx >= 0) { S.chat.messages[idx].text = textoFinal; delete S.chat.messages[idx].typing; }
-      else { S.chat.messages.push({ id: 'msg-' + uid(), channelId, authorId: 'ia', authorName: 'IA · Migoo', text: textoFinal, createdAt: new Date().toISOString(), ai: true }); }
-      save(); render();
-      const el3 = $('#chat-msgs'); if (el3) el3.scrollTop = el3.scrollHeight;
-    } catch (e) {
-      const idx = S.chat.messages.findIndex(m => m.ai && m.typing && m.channelId === channelId);
-      if (idx >= 0) { S.chat.messages[idx].text = 'Erro: ' + (e.message || 'IA não respondeu'); delete S.chat.messages[idx].typing; }
-      save(); render(); toast('Falha ao consultar a IA: ' + (e.message || e));
-    }
-  },
-  async chatDirectGemini() {
-    route = 'chat-direct-gemini'; routeChat = 'geral'; render();
-  },
-  async chatAskGeminiDirect() {
-    const input = $('#chat-input'); const text = String(input?.value || '').trim();
-    if (!text && !chatAnexos.length) return toast('Digite uma mensagem ou anexe um arquivo para o Gemini.');
-    if (!geminiConectado) return toast('O Gemini não está conectado. Configure a chave Gemini em Configurações.');
-    const now = new Date().toISOString();
-    const anexos = chatAnexos.map(a => ({ nome: a.name, tipo: a.type, dados: a.data.split(',')[1] || a.data }));
-    S.chat.messages.push({ id: 'msg-' + uid(), channelId: 'gemini-direct', authorId: me?.id, authorName: me?.name || me?.email || 'Você', text, createdAt: now, anexos: anexos.length ? anexos : undefined });
-    input.value = ''; chatAnexos = []; save(); render();
-    const el = $('#chat-msgs'); if (el) el.scrollTop = el.scrollHeight;
-
-    // Comando /publicar para acionar publicação direta (Direct Gemini)
-    if (/^\/publicar(\s|$)/i.test(text)) {
-      try {
-        await chatExecPublish(text);
-        render();
-        return;
-      } catch (e) {
-        toast('Erro ao publicar: ' + (e.message || e));
-        render();
-        return;
-      }
-    }
-
-    S.chat.messages.push({ id: 'msg-' + uid(), channelId: 'gemini-direct', authorId: 'ia', authorName: 'IA · Gemini', text: '…', createdAt: now, ai: true, typing: true });
-    save(); render();
-    try {
-      const geminiKey = String(S.settings.geminiKey || '').trim();
-      const geminiModel = String(S.settings.geminiModel || 'gemini-3.5-flash-lite').trim();
-      if (!geminiKey) throw new Error('Configure a chave Gemini em Configurações.');
-      // Ler anexos de planilha/texto
-      let anexoTexto = '';
-      for (const a of anexos) {
-        if (a.tipo.includes('csv') || a.tipo.includes('json') || a.tipo.includes('spreadsheet') || a.tipo === 'text/plain') {
-          try {
-            const bin = atob(a.dados.split(',')[1] || a.dados);
-            const bytes = new Uint8Array(bin.length);
-            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-            const conteudo = new TextDecoder().decode(bytes);
-            anexoTexto += `\n\n--- Arquivo: ${a.nome} ---\n${conteudo.slice(0, 8000)}`;
-          } catch (e) { anexoTexto += `\n\n--- Arquivo: ${a.nome} (erro ao ler) ---`; }
-        }
-      }
-      const mensagemComAnexos = text + anexoTexto;
-
-      // Tentar interpretar comando local primeiro (sem depender da Gemini inventando)
-      const cmd = interpretarComandoLocal(text, anexos);
-      if (cmd) {
-        let resultado;
-        if (cmd.nome === 'erro_produto') {
-          resultado = cmd.resposta;
-        } else if (cmd.nome.startsWith('publicar_post')) {
-          resultado = await executarPublicacaoChat(cmd);
-        } else if (cmd.nome === 'criar_task' || cmd.nome === 'alternar_atendimento') {
-          resultado = await actions.executarAcaoIA(cmd);
-        } else {
-          await actions.executarAcaoIA(cmd);
-          resultado = cmd.resposta;
-        }
-        const idx = S.chat.messages.findIndex(m => m.ai && m.typing && m.channelId === 'gemini-direct');
-        if (idx >= 0) { S.chat.messages[idx].text = resultado; delete S.chat.messages[idx].typing; }
-        save(); render();
-        const el3 = $('#chat-msgs'); if (el3) el3.scrollTop = el3.scrollHeight;
-        return;
-      }
-      const tools = getGeminiFunctionDeclarations();
-      const systemInstruction = `Voc\u00ea \u00e9 a assistente operacional do Vizzion Centro de Comando. Responda em portugu\u00eas do Brasil, de forma objetiva e curta.
-
-FERRAMENTAS DISPON\u00cdVEIS: Voc\u00ea pode executar a\u00e7\u00f5es reais no painel usando as fun\u00e7\u00f5es listadas. Sempre que o usu\u00e1rio pedir para fazer algo no painel (criar task, buscar produto, publicar, ligar atendimento, etc.), USE a fun\u00e7\u00e3o correspondente em vez de apenas responder texto.
-
-Se precisar de informa\u00e7\u00f5es que n\u00e3o tem, use as fun\u00e7\u00f5es de busca (search_catalog, list_projects, get_cheapest_product, get_project_products) antes de responder.
-
-Anexos: O usu\u00e1rio pode enviar fotos, v\u00eddeos, planilhas CSV/JSON e arquivos de texto. Se houver anexos, eles est\u00e3o dispon\u00edveis no contexto da mensagem.`;
-
-      const userParts = [];
-      if (anexos && anexos.length) {
-        for (const a of anexos) {
-          if (a.tipo.startsWith('image/') || a.tipo.startsWith('video/')) {
-            userParts.push({ inlineData: { mimeType: a.tipo, data: a.dados.split(',')[1] || a.dados } });
-            userParts.push({ text: `[Anexo: ${a.nome} (${a.tipo})]` });
-          } else if (a.tipo.includes('csv') || a.tipo.includes('json') || a.tipo.includes('spreadsheet') || a.tipo === 'text/plain') {
-            // j\u00e1 est\u00e1 no anexoTexto
-          } else {
-            userParts.push({ text: `[Anexo: ${a.nome} (${a.tipo})]` });
-          }
-        }
-      }
-      userParts.push({ text: mensagemComAnexos });
-
-      let contents = [{ role: 'user', parts: userParts }];
-      let finalText = '';
-      let acoesExecutadas = [];
-
-      for (let round = 0; round < 8; round++) {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-goog-api-key': geminiKey },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: systemInstruction }] },
-            contents,
-            tools: tools.length ? [{ functionDeclarations: tools }] : undefined,
-            generationConfig: { maxOutputTokens: 1200, temperature: 0.7 }
-          })
-        });
-        const result = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          const status = Number(response.status);
-          const errorCode = String(result?.error?.status || '').slice(0, 80);
-          throw new Error(`Gemini (HTTP ${status}): ${errorCode || 'falha na requisi\u00e7\u00e3o.'}`);
-        }
-        const candidate = result?.candidates?.[0];
-        if (!candidate) break;
-        const parts = candidate.content?.parts || [];
-        let hasFunctionCall = false;
-        for (const part of parts) {
-          if (part.text) {
-            contents.push({ role: 'model', parts: [{ text: part.text }] });
-            finalText = part.text;
-          }
-          if (part.functionCall) {
-            hasFunctionCall = true;
-            const { name, args } = part.functionCall;
-            contents.push({ role: 'model', parts: [{ text: `\u2713 Executando: ${name}` }] });
-            const toolResult = await executeTool(name, args || {});
-            acoesExecutadas.push({ nome: name, args, resultado: toolResult });
-            const resultadoTexto = toolResult.success ? JSON.stringify(toolResult.result, null, 2).slice(0, 3000) : `Erro: ${toolResult.error}`;
-            contents.push({ role: 'function', parts: [{ functionResponse: { name: name, response: { content: resultadoTexto } } }] });
-          }
-        }
-        if (!hasFunctionCall) break;
-      }
-
-      let textoFinal = finalText || 'A Gemini n\u00e3o retornou conte\u00fado.';
-      if (acoesExecutadas.length) {
-        textoFinal += '\n\n' + acoesExecutadas.map(a => {
-          if (a.resultado.success) return `\u2713 ${a.nome}: ${a.resultado.result.message || JSON.stringify(a.resultado.result).slice(0, 200)}`;
-          return `\u2717 ${a.nome}: ${a.resultado.error}`;
-        }).join('\n');
-      }
-      const idx = S.chat.messages.findIndex(m => m.ai && m.typing && m.channelId === 'gemini-direct');
-      if (idx >= 0) { S.chat.messages[idx].text = textoFinal; delete S.chat.messages[idx].typing; }
-      else { S.chat.messages.push({ id: 'msg-' + uid(), channelId: 'gemini-direct', authorId: 'ia', authorName: 'IA \u00b7 Gemini', text: textoFinal, createdAt: new Date().toISOString(), ai: true }); }
-      save(); render();
-      const el3 = $('#chat-msgs'); if (el3) el3.scrollTop = el3.scrollHeight;
-    } catch (e) {
-      const idx = S.chat.messages.findIndex(m => m.ai && m.typing && m.channelId === 'gemini-direct');
-      if (idx >= 0) { S.chat.messages[idx].text = 'Erro: ' + (e.message || 'Gemini não respondeu'); delete S.chat.messages[idx].typing; }
-      save(); render(); toast('Falha ao consultar o Gemini: ' + (e.message || e));
-    }
-  },
-  async chatLimparHistorico() {
-    if (!confirm('Limpar todo o histórico deste chat? Essa ação não pode ser desfeita.')) return;
-    const cid = route === 'chat-direct-gemini' ? 'gemini-direct' : (routeChat || 'geral');
-    S.chat.messages = S.chat.messages.filter((m) => m.channelId !== cid);
-    save(); render(); toast('Histórico do chat limpo.');
-  },
-  async executarAcaoIA(acao) {
-    const { nome, args } = acao;
-    if (nome === 'alternar_atendimento') {
-      att.net = args.rede || 'whatsapp';
-      att.watching = args.ligar === true;
-      render();
-      if (args.ligar) {
-        const r = await callNet(att.net, { type: 'CHAT_WATCH', on: true });
-        if (!r?.ok) throw new Error(r?.error || 'Não foi possível ligar o monitor.');
-        toast('Atendimento automático ligado via IA.');
-      } else {
-        toast('Atendimento automático desligado via IA.');
-      }
-      return;
-    }
-    if (nome === 'criar_task') {
-      const p = proj(args.projeto) || myProjects()[0];
-      if (!p) throw new Error('Projeto não encontrado.');
-      S.tasks.push({ id: uid(), date: args.data || today(), done: false, createdBy: me?.id || null, key: `chat:${Date.now()}`, projectId: p.id, title: args.titulo, kind: args.tipo || 'general' });
-      save(); audit('task.created', 'task', 'chat', { title: args.titulo, projectId: p.id });
-      render(); toast(`Task "${args.titulo}" criada no projeto ${p.name}.`);
-      return;
-    }
-    if (nome === 'publicar_post') {
-      pub.nets = {}; args.redes.forEach(n => pub.nets[n] = true);
-      pub.text = args.texto || '';
-      pub.autoPost = args.automatico !== false;
-      pub.postNow = true;
-      if (args.arquivo_dados) {
-        const bin = atob(args.arquivo_dados);
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        pub.file = new File([bytes], args.arquivo_nome || 'anexo', { type: args.arquivo_tipo || 'application/octet-stream' });
-        pub.mediaType = pub.file.type.startsWith('image/') ? 'photo' : 'video';
-      }
-      await actions.runPublish();
-      toast('Publicação executada via IA.');
-      return;
-    }
-    if (nome === 'importar_catalogo') {
-      toast('Importação de catálogo via IA requer o arquivo enviado na conversa. Anexe o CSV/JSON e peça novamente.');
-      return;
-    }
-    if (nome === 'enriquecer_catalogo' || nome === 'buscar_produtos' || nome === 'pesquisar_mercado' || nome === 'listar_projetos') {
-      // Estas já são executadas pelo MCP; apenas informar
-      return;
-    }
-    throw new Error(`Ação não suportada localmente: ${nome}`);
-  },
-  chatDelMessage(el) {
-    const mid = el.dataset.mid; if (!mid) return;
-    S.chat.messages = S.chat.messages.filter((m) => m.id !== mid);
-    save(); render(); toast('Mensagem excluída.');
-  },
-  chatAnexar(el) {
-    const f = $('#chat-anexo-file'); if (!f || !f.files?.length) return;
-    for (const file of [...f.files]) {
-      if (file.size > 25 * 1024 * 1024) { toast(`${file.name}: limite de 25 MB.`); continue; }
-      const r = new FileReader();
-      r.onload = () => { chatAnexos.push({ name: file.name, type: file.type, data: r.result }); render(); f.value = ''; };
-      r.onerror = () => toast(`Não foi ler ${file.name}.`);
-      r.readAsDataURL(file);
-    }
-  },
-  chatRemoverAnexo(el) {
-    const i = +el.dataset.index; if (i >= 0 && i < chatAnexos.length) chatAnexos.splice(i, 1);
-    render();
-  },
-  chatLimparAnexos() { chatAnexos = []; render(); },
-  parsePublishCommand(text) {
-    const t = text.replace(/^\/publicar\s*/i, '').trim();
-    const nets = ['facebook','instagram','tiktok','youtube'].filter(n => new RegExp('\\b'+n+'\\b','i').test(t));
-    const mediaType = /\bvídeo|\bvideo\b/i.test(t) ? 'video' : 'photo';
-    const productImages = /\bproduto|\bmidia do produto|\bmídia do produto\b/i.test(t);
-    const produtoMatch = t.match(/produto\s+(.+)/i);
-    const produtoNome = produtoMatch ? produtoMatch[1].trim() : null;
-    return { nets, mediaType, productImages, produtoNome };
-  },
-  async chatExecPublish(text) {
-    // Abre a aba Publicar para o usuário ver a interface preenchida
-    route = 'publicar';
-    render();
-
-    const tl = text.toLowerCase();
-    const parsed = this.parsePublishCommand(text);
-
-    // Detectar redes mencionadas (melhor detecção que o parsePublishCommand sozinho)
-    const redes = [];
-    if (tl.match(/\bfacebook\b/)) redes.push('facebook');
-    if (tl.match(/\binstagram\b/)) redes.push('instagram');
-    if (tl.match(/\btiktok\b/)) redes.push('tiktok');
-    if (tl.match(/\byoutube\b/)) redes.push('youtube');
-    if (!redes.length && parsed.nets.length) redes.push(...parsed.nets);
-
-    if (!redes.length) throw new Error('Informe ao menos uma rede: facebook, instagram, tiktok ou youtube.');
-
-    // Detectar destino Facebook
-    let facebook_destino = null;
-    if (tl.match(/\bmarketplace\b/)) facebook_destino = 'marketplace';
-    else if (tl.match(/\bfeed\b/)) facebook_destino = 'feed';
-
-    // Detectar agendamento
-    const ehAgendamento = tl.match(/\b(agende|agendar|agendado|amanh|as\s+\d{1,2}:\d{2}|\d{1,2}:\d{2})/i);
-
-    // Extrair texto entre aspas como legenda
-    const aspas = text.match(/['"](.+)['"]/);
-    const legendaAspas = aspas ? aspas[1].trim() : '';
-
-    // Extrair produto
-    let produtoNome = null;
-    let produtoFaixaMin = null;
-    let produtoFaixaMax = null;
-    let produtoGenerico = false;
-    let mMaisBarato = tl.match(/\b(mais\s+barato|barato|menor\s+preco|menor preço)\b/i);
-    let mMaisCaro = tl.match(/\b(mais\s+caro|caro|maior\s+preco|maior preço)\b/i);
-
-    const mProdNome = tl.match(/(?:produto|item|celular|smartphone|moto|iphone|samsung|xiaomi)\s+(.{1,60}?)(?:\s+(?:no|na|entre|de|\$|R\$|reais|real))?\s*$/i);
-    if (mProdNome) produtoNome = mProdNome[1].trim();
-    if (tl.match(/\b(qualquer\s+)?(celular|smartphone|produto|item)\b/i)) produtoGenerico = true;
-    const mFaixa = tl.match(/entre\s+([\d.,]+)\s+e\s+([\d.,]+)/i);
-    if (mFaixa) { produtoFaixaMin = parseFloat(mFaixa[1].replace(',', '.')); produtoFaixaMax = parseFloat(mFaixa[2].replace(',', '.')); }
-
-    // Buscar produto no catálogo
-    let produto = null;
-    if (mMaisCaro) {
-      const candidatos = P.filter(p => parseFloat(String(p.price || '').replace(/[^\d,]/g, '').replace(',', '.')) > 0)
-        .sort((a, b) => {
-          const pa = parseFloat(String(a.price || '').replace(/[^\d,]/g, '').replace(',', '.'));
-          const pb = parseFloat(String(b.price || '').replace(/[^\d,]/g, '').replace(',', '.'));
-          return pb - pa; // decrescente
-        });
-      produto = candidatos[0] || null;
-    } else if (mMaisBarato) {
-      const candidatos = P.filter(p => parseFloat(String(p.price || '').replace(/[^\d,]/g, '').replace(',', '.')) > 0)
-        .sort((a, b) => {
-          const pa = parseFloat(String(a.price || '').replace(/[^\d,]/g, '').replace(',', '.'));
-          const pb = parseFloat(String(b.price || '').replace(/[^\d,]/g, '').replace(',', '.'));
-          return pa - pb;
-        });
-      produto = candidatos[0] || null;
-    } else if (produtoFaixaMin !== null && produtoFaixaMax !== null) {
-      const candidatos = P.filter(p => {
-        const preco = parseFloat(String(p.price || '').replace(/[^\d,]/g, '').replace(',', '.'));
-        return preco >= produtoFaixaMin && preco <= produtoFaixaMax;
-      }).sort((a, b) => {
-        const pa = parseFloat(String(a.price || '').replace(/[^\d,]/g, '').replace(',', '.'));
-        const pb = parseFloat(String(b.price || '').replace(/[^\d,]/g, '').replace(',', '.'));
-        return pa - pb;
-      });
-      produto = candidatos[0] || null;
-    } else if (produtoNome) {
-      produto = P.find(p => String(p.title || '').toLowerCase().includes(produtoNome.toLowerCase()));
-      if (!produto) return { nome: 'erro_produto', args: {}, resposta: 'N\u00e3o encontrei produto no cat\u00e1logo "' + produtoNome + '".' };
-    } else if (produtoGenerico) {
-      const candidatos = P.filter(p => {
-        const title = String(p.title || '').toLowerCase();
-        return title.includes('celular') || title.includes('smartphone') || title.includes('iphone') || title.includes('samsung') || title.includes('moto') || title.includes('xiaomi');
-      });
-      produto = candidatos[0] || null;
-    }
-
-    // Se é marketplace e não tem produto, erro
-    if (facebook_destino === 'marketplace' && !produto) {
-      throw new Error('Para publicar no Facebook Marketplace é necessário selecionar um produto do catálogo.');
-    }
-
-    // Preparar args para a função central
-    const args = {
-      redes,
-      facebook_destino,
-      texto: legendaAspas || (produto ? `${produto.title} - confira agora!` : ''),
-      produto_id: produto ? produto.id : undefined,
-      produto_nome: produto ? produto.title : undefined,
-      agendado: ehAgendamento ? true : undefined,
-      automatico: true,
-      postNow: !ehAgendamento,
-    };
-
-    // Se tem anexo no chatAnexos
-    if (chatAnexos.length) {
-      const arquivo = chatAnexos[0];
-      args.arquivo_dados = arquivo.dados.split(',')[1] || arquivo.dados;
-      args.arquivo_nome = arquivo.nome;
-      args.arquivo_tipo = arquivo.tipo;
-    }
-
-    // Preparar publicação usando função central
-    prepararPublicacaoChat(args);
-
-    // Executar
-    if (pub.postNow) {
-      await actions.runPublish();
-      return `✅ Publicação executada no painel para ${redes.join(', ')}.`;
-    } else {
-      await actions.submitPublish();
-      return `❰ Publicação agendada na fila do painel para ${redes.join(', ')}.`;
-    }
   },
   async login() {
     const backend = DEFAULT_BACKEND_URL;
@@ -2232,7 +1037,6 @@ Anexos: O usu\u00e1rio pode enviar fotos, v\u00eddeos, planilhas CSV/JSON e arqu
     try {
       aiProjectStatus[el.dataset.pid] = await api(`/projects/${encodeURIComponent(el.dataset.pid)}/ai-key`, { method: 'PUT', body: JSON.stringify({ apiKey }) });
       if (input) input.value = '';
-      refreshGeminiStatus(el.dataset.pid);
       render(); toast('Chave Gemini protegida e salva no projeto.');
     } catch (e) { toast(e.message || 'Não foi possível salvar a chave Gemini.'); }
   },
@@ -2240,7 +1044,6 @@ Anexos: O usu\u00e1rio pode enviar fotos, v\u00eddeos, planilhas CSV/JSON e arqu
     try {
       await api(`/projects/${encodeURIComponent(el.dataset.pid)}/ai-key`, { method: 'POST', body: JSON.stringify({ model: proj(el.dataset.pid)?.aiModel || '' }) });
       aiProjectStatus[el.dataset.pid] = await api(`/projects/${encodeURIComponent(el.dataset.pid)}/ai-key`);
-      refreshGeminiStatus(el.dataset.pid);
       render(); toast('Conexão Gemini confirmada.');
     } catch (e) { toast(e.message || 'Não foi possível testar a conexão Gemini.'); }
   },
@@ -2249,7 +1052,6 @@ Anexos: O usu\u00e1rio pode enviar fotos, v\u00eddeos, planilhas CSV/JSON e arqu
     try {
       await api(`/projects/${encodeURIComponent(el.dataset.pid)}/ai-key`, { method: 'DELETE' });
       aiProjectStatus[el.dataset.pid] = { configured: false };
-      refreshGeminiStatus(el.dataset.pid);
       render(); toast('Chave Gemini removida.');
     } catch (e) { toast(e.message || 'Não foi possível remover a chave Gemini.'); }
   },
@@ -2289,34 +1091,11 @@ Anexos: O usu\u00e1rio pode enviar fotos, v\u00eddeos, planilhas CSV/JSON e arqu
     const p = { id: uid(), name, bio: '', logo: '', dailyPosts: 3, tasksPerDay: 2, memberIds: [me.id], stages: [], accounts: [], tools: [], bot: {} };
     S.projects.push(p); save(); audit('project.created', 'project', p.id, { title: p.name }); route = 'proj:' + p.id; render();
   },
-  async delProject(el) {
+  delProject(el) {
     const p = proj(el.dataset.id);
-    if (!p || !confirm(`Excluir o projeto "${p.name}" e todos os seus dados (tasks, cat�logo, publica��es agendadas, hist�rico)?`)) return;
-    // Remover produtos do cat�logo pertencentes a este projeto
-    P = P.filter((x) => String(x.projectId || '') !== String(p.id));
-    IDX.clear();
-    await saveProducts();
-    // Remover tarefas do projeto
-    S.tasks = S.tasks.filter((t) => t.projectId !== p.id);
-    // Remover publica��es agendadas do projeto
-    S.scheduledPosts = S.scheduledPosts || [];
-    S.scheduledPosts = S.scheduledPosts.filter((q) => String(q.projectId || '') !== String(p.id));
-    // Remover log de publica��es do projeto
-    S.postsLog = S.postsLog || [];
-    S.postsLog = S.postsLog.filter((l) => String(l.projectId || '') !== String(p.id));
-    // Remover mensagens de chat de canais do projeto
-    S.chat.messages = S.chat.messages.filter((m) => {
-      if (m.channelId && m.channelId.startsWith('proj:' + p.id)) return false;
-      if (m.channelId && m.channelId.startsWith('ch-')) {
-        const ch = S.chat.channels.find((c) => c.id === m.channelId);
-        if (ch && ch.projectId === p.id) return false;
-      }
-      return true;
-    });
-    // Remover canais de chat do projeto
-    S.chat.channels = S.chat.channels.filter((c) => c.projectId !== p.id);
-    // Remover o projeto
+    if (!p || !confirm(`Excluir o projeto "${p.name}" e suas tasks?`)) return;
     S.projects = S.projects.filter((x) => x.id !== p.id);
+    S.tasks = S.tasks.filter((t) => t.projectId !== p.id);
     save(); audit('project.deleted', 'project', p.id, { title: p.name }); render();
   },
   toggleMember(el) {
@@ -2424,32 +1203,12 @@ Anexos: O usu\u00e1rio pode enviar fotos, v\u00eddeos, planilhas CSV/JSON e arqu
     insightsBusy = true; render();
     const top = offers(8); let items;
     try {
-      const projId = top[0]?.projectId || myProjects()[0]?.id;
       const t = await ai('Você é estrategista de conteúdo para afiliados no Brasil. Responda SOMENTE JSON: [{"produto":"","ideia":"","formato":"","gancho":""}] com 5 ideias de post para Instagram, TikTok, YouTube Shorts ou Facebook ligadas aos produtos. Não invente preços.',
-        JSON.stringify(top.map((p) => ({ titulo: p.title, preco: p.price, desconto: pct(p), categoria: p.category }))), 900, projId);
+        JSON.stringify(top.map((p) => ({ titulo: p.title, preco: p.price, desconto: pct(p), categoria: p.category }))), 900, top[0]?.projectId || myProjects()[0]?.id);
       items = parseJSON(t);
     } catch (e) {
-      // Fallback: tentar via chave Gemini global (Direct Gemini)
-      try {
-        const geminiKey = String(S.settings.geminiKey || '').trim();
-        const geminiModel = String(S.settings.geminiModel || 'gemini-3.5-flash-lite').trim();
-        if (geminiKey) {
-          const produtosTxt = top.map((p) => `Produto: ${p.title}\nPre�o: ${brl(p.price)}\nCategoria: ${p.category || ''}`).join('\n\n');
-          const t = await askGeminiDirect(
-            'Voc� � estrategista de conte�do para afiliados no Brasil. Responda SOMENTE JSON: [{"produto":"","ideia":"","formato":"","gancho":""}] com 5 ideias de post para Instagram, TikTok, YouTube Shorts ou Facebook ligados aos produtos. N�o invente pre�os.',
-            'Produtos: ' + produtosTxt,
-            geminiModel,
-            geminiKey,
-            []
-          );
-          items = parseJSON(t);
-        } else {
-          throw new Error('Nenhuma chave Gemini configurada.');
-        }
-      } catch (e2) {
-        items = top.slice(0, 5).map((p) => ({ produto: p.title, ideia: 'Mostre o produto em uso e termine com o pre�o atual (' + brl(p.price) + ').', formato: 'Reels ou TikTok de 15s', gancho: 'Achei isso por ' + brl(p.price) + '...' }));
-        toast('A IA falhou; mostrando sugest�es b�sicas.');
-      }
+      items = top.slice(0, 5).map((p) => ({ produto: p.title, ideia: 'Mostre o produto em uso e termine com o preço atual (' + brl(p.price) + ').', formato: 'Reels ou TikTok de 15s', gancho: 'Achei isso por ' + brl(p.price) + '…' }));
+      toast('A IA falhou; mostrando sugestões básicas.');
     }
     S.insights = { date: today(), items }; insightsBusy = false; save(false); render();
   },
@@ -2528,21 +1287,6 @@ Anexos: O usu\u00e1rio pode enviar fotos, v\u00eddeos, planilhas CSV/JSON e arqu
           }
         }
         const t = await getNetTab(n, { navigate: true, mediaType, destination });
-        // TikTok Studio: aguardar o input de upload ficar dispon�vel na p�gina (n�o usa sleep fixo)
-        if (n === 'tiktok') {
-          pub.status[statusKey].m = 'aguardando carregar p�gina do TikTok…'; render();
-          await chrome.scripting.executeScript({
-            target: { tabId: t.id },
-            world: 'MAIN',
-            func: () => new Promise((res) => {
-              const iv = setInterval(() => {
-                const inp = document.querySelector('input.hiddenInput-Km7jgh');
-                if (inp) { clearInterval(iv); res(true); }
-              }, 500);
-              setTimeout(() => { clearInterval(iv); res(false); }, 30000);
-            })
-          });
-        }
         pub.status[statusKey].m = 'enviando…'; render();
         const filesToSend = pub.productImages
           ? n === 'youtube' ? productFiles.filter(item => item.type === 'video').map(item => item.file).slice(0, 1)
@@ -2550,18 +1294,8 @@ Anexos: O usu\u00e1rio pode enviar fotos, v\u00eddeos, planilhas CSV/JSON e arqu
             : productFiles.map(item => item.file)
           : destination === 'marketplace' ? productFiles.filter(item => item.type === 'image').map(item => item.file).slice(0, 10)
             : (pub.file ? [pub.file] : []);
-        if (!filesToSend.length) throw new Error(`Nenhum arquivo selecionado para enviar ao ${n}.`);
         const fileIds = [];
         for (const file of filesToSend) fileIds.push(await sendFile(t.id, n, file));
-        
-        // Aguardar o TikTok processar o upload da midia antes de enviar o texto.
-        // O POST_FILL so deve ser enviado apos a midia estar pronta na plataforma.
-        if (n === 'tiktok') {
-          pub.status[statusKey].m = 'aguardando processamento da midia no TikTok…'; render();
-          const mediaReady = await waitForTikTokMediaReady(t.id, fileIds);
-          if (!mediaReady) throw new Error('TikTok nao confirmou o processamento da midia dentro do tempo limite.');
-        }
-
         const title = n === 'tiktok' ? String(pub.title || '').trim() : '';
         const body = String(pub.text || '').trim();
         const duplicateTitle = title && new RegExp(`^${title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*(?:\\r?\\n)+`, 'i').test(body);
@@ -2727,7 +1461,7 @@ Anexos: O usu\u00e1rio pode enviar fotos, v\u00eddeos, planilhas CSV/JSON e arqu
     } catch (e) { toast('IA indisponível; usando modelos padrão.'); }
     if (!pairs.length) pairs = [
       { intro: '🔥 Ofertas imperdíveis de hoje!', outro: 'Corre que o estoque acaba rápido!' },
-      { intro: '🛝︝ Achadinhos selecionados pra você', outro: 'Aproveite enquanto está nesse preço!' },
+      { intro: '🛍️ Achadinhos selecionados pra você', outro: 'Aproveite enquanto está nesse preço!' },
       { intro: '⚡ Promoção relâmpago no ar', outro: 'Garanta o seu antes que mude!' },
     ];
     off.vars = Array.from({ length: k }, (_, i) => {
@@ -2836,16 +1570,7 @@ let pendingAuditAction = null;
 const run = (fn, el, e) => Promise.resolve().then(() => fn(el, e)).catch((err) => { console.error(err); toast(err.message || String(err)); });
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
-  if (!el) return;
-  // Inputs de arquivo abrem a janela do SO nativamente; nao impedir o default neles.
-  if (el.type !== 'file') e.preventDefault();
-  // Abrir seletor de arquivo ao clicar no botao clip do chat
-  if (el.dataset.act === 'chatAnexar' && el.tagName === 'BUTTON') {
-    const input = $('#chat-anexo-file');
-    if (input) input.click();
-    return;
-  }
-  if (el.type === 'file') return;
+  if (!el || el.type === 'file') return;
   const a = actions[el.dataset.act];
   if (a) { pendingAuditAction = el.dataset.act; run(a, el, e); }
 });
@@ -2869,16 +1594,6 @@ document.addEventListener('input', (e) => {
   bindField(el, false);
 });
 document.addEventListener('change', (e) => { if(e.target.id==='vitrine-category'){window.__vizzionVitrineCategory=e.target.value;vitrinePage=0;renderVitrineResults();} if(e.target.id==='vitrine-sort'){window.__vizzionVitrineSort=e.target.value;vitrinePage=0;renderVitrineResults();} });
-document.addEventListener('keydown', (e) => {
-  const el = e.target;
-  if (el.id === 'chat-input') {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      const act = document.querySelector('[data-act="chatAskGeminiDirect"]') ? 'chatAskGeminiDirect' : 'chatSend';
-      actions[act]?.();
-    }
-  }
-});
 function bindField(el, isChange) {
   const map = { pub, att, off };
   for (const k of ['pub', 'att', 'off']) {
@@ -3098,14 +1813,6 @@ async function processOfferQueue() {
 /* ---------- início ---------- */
 (async () => {
   await load();
-  mcpConectado = Boolean(String(S.settings.mcpUrl || '').trim());
-  geminiConectado = Boolean(String(S.settings.geminiKey || '').trim());
-  // Tambem considerar chaves ja configuradas em projetos
-  if (!geminiConectado) {
-    for (const pid of Object.keys(aiProjectStatus || {})) {
-      if (aiProjectStatus[pid]?.configured) { geminiConectado = true; break; }
-    }
-  }
   if (AUTH && S.settings.backendUrl) {
     const valid = await ensureAuth();
     if (valid) {
@@ -3127,12 +1834,3 @@ async function processOfferQueue() {
   setInterval(() => { if (AUTH && me && S.lastGen !== today()) { const n = generateTasks(); audit('tasks.generated', 'task', '', { title: `${n} tarefas geradas automaticamente`, count: n }); render(); } }, 15000);
   setInterval(() => { if (AUTH && me) refreshNotificationCounts(true).catch(e=>console.warn('notification counters',e)); }, 30000);
 })();
-
-
-
-
-
-
-
-
-

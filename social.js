@@ -56,7 +56,7 @@
     // Instagram exige passar pelas telas de enquadramento/filtros antes de mostrar a legenda.
     // O enquadramento inicial da plataforma é centralizado; não tentamos preencher a legenda
     // até que o editor de legenda esteja realmente disponível.
-    const capSel = 'div[aria-label*="legenda" i][contenteditable="true"],div[aria-label*="caption" i][contenteditable="true"],div[data-placeholder*="legenda" i][contenteditable="true"],div[data-placeholder*="caption" i][contenteditable="true"],textarea[placeholder*="legenda" i],textarea[placeholder*="caption" i],textarea[aria-label*="legenda" i],textarea[aria-label*="caption" i],div[contenteditable="true"][role="textbox"]';
+    const capSel = 'div[aria-label*="legenda" i][contenteditable="true"],div[aria-label*="caption" i][contenteditable="true"],div[contenteditable="true"][role="textbox"],textarea[aria-label*="legenda" i],textarea[aria-label*="caption" i]';
     const visible = (el) => {
       if (!el || !el.isConnected || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
       const r = el.getBoundingClientRect();
@@ -548,28 +548,35 @@
       CC.banner('TikTok Foto: upload iniciado; aguardando a caixa de legenda ficar disponível...');
     }
     const visible = (el) => !!el && !!el.getClientRects().length && el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0;
-    const findCaption = () => {
-      const selectors = [
-        '.public-DraftEditor-content[contenteditable="true"]',
-        'textarea[placeholder*="description" i]',
-        'textarea[placeholder*="descri" i]',
-        'textarea[aria-label*="description" i]',
-        'textarea[aria-label*="descri" i]',
-        'textarea[data-placeholder*="description" i]',
-        'textarea[data-placeholder*="descri" i]',
-        '[contenteditable="true"][data-placeholder*="description" i]',
-        '[contenteditable="true"][data-placeholder*="descri" i]',
-        '[contenteditable="true"][aria-label*="caption" i]',
-        '[contenteditable="true"][aria-label*="legenda" i]',
-        '[contenteditable="true"][aria-label*="description" i]',
-        '[contenteditable="true"][aria-label*="descri" i]',
-        'textarea[placeholder*="caption" i]',
-        'textarea[placeholder*="legenda" i]',
-        'textarea[placeholder*="describe" i]',
-        '[contenteditable="true"][data-placeholder]',
-        'div[contenteditable="true"]',
-        'textarea'
-      ];
+      const findCaption = () => {
+        const selectors = [
+          '.public-DraftEditor-content[contenteditable="true"]',
+          'textarea[placeholder*="description" i]',
+          'textarea[placeholder*="descri" i]',
+          'textarea[placeholder*="legenda" i]',
+          'textarea[placeholder*="descrição" i]',
+          'textarea[aria-label*="description" i]',
+          'textarea[aria-label*="descri" i]',
+          'textarea[aria-label*="legenda" i]',
+          'textarea[aria-label*="descrição" i]',
+          'textarea[data-placeholder*="description" i]',
+          'textarea[data-placeholder*="descri" i]',
+          'textarea[data-placeholder*="legenda" i]',
+          'textarea[data-placeholder*="descrição" i]',
+          'textarea[maxlength="4000"]',
+          '[contenteditable="true"][data-placeholder*="description" i]',
+          '[contenteditable="true"][data-placeholder*="descri" i]',
+          '[contenteditable="true"][data-placeholder*="legenda" i]',
+          '[contenteditable="true"][data-placeholder*="descrição" i]',
+          '[contenteditable="true"][aria-label*="caption" i]',
+          '[contenteditable="true"][aria-label*="legenda" i]',
+          '[contenteditable="true"][aria-label*="description" i]',
+          '[contenteditable="true"][aria-label*="descri" i]',
+          '[contenteditable="true"][aria-label*="descrição" i]',
+          '[contenteditable="true"][data-placeholder]',
+          'div[contenteditable="true"]',
+          'textarea'
+        ];
       for (const selector of selectors) {
         const el = [...document.querySelectorAll(selector)].find(visible);
         if (el) return el;
@@ -580,17 +587,14 @@
       ? 'TikTok Foto: a caixa de legenda não ficou disponível em até 60 segundos após o upload da imagem.'
       : 'TikTok Vídeo: a caixa de legenda não ficou disponível em até 60 segundos após o upload do vídeo. Confira se o vídeo terminou de carregar e se a tela de publicação está aberta.');
     CC.banner(actualMediaType === 'photo' ? 'TikTok Foto: caixa de legenda encontrada; digitando o texto gradualmente...' : 'TikTok Vídeo: caixa de legenda encontrada; preenchendo o texto...');
-    if (ed.isContentEditable) {
-      // Uma inserção por caractere faz o editor controlado do TikTok reposicionar
-      // o cursor e inverter/reordenar blocos. Usa o caminho de paste do utilitário,
-      // com fallback por linha apenas se o TikTok rejeitar o evento.
+    if (actualMediaType === 'photo') {
       const caption = String(text || '').trim();
       CC.setText(ed, caption);
       ed.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: null }));
     } else {
-      // Para campos input/textarea, zera o nome automático antes de inserir a legenda.
-      if (actualMediaType === 'video') CC.setText(ed, '');
-      CC.setText(ed, text);
+      // Fluxo exclusivo de vídeo: apenas setText, sem InputEvent extra para evitar duplicação no DraftEditor
+      const caption = String(text || '').trim();
+      CC.setText(ed, caption);
     }
     await CC.sleep(900);
     const entered = String(ed.innerText || ed.value || ed.textContent || '').trim();
