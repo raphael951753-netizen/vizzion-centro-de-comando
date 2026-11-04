@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Coletor + Conversor Meli</title>
+<style>
+*{box-sizing:border-box}body{font:13px Arial,sans-serif;width:380px;padding:12px;margin:0;color:#222}
+h3{margin:0 0 8px;font-size:17px}label{display:block;margin-top:6px}
+#pageCount{width:100%;padding:8px;border:1px solid #ccc;border-radius:6px;margin:4px 0 6px}
+.box{background:#f5f5f5;border-radius:6px;padding:9px;margin:8px 0;line-height:1.45;overflow-wrap:anywhere;font-size:12px}
+.nums{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;text-align:center;margin:8px 0}
+.nums div{background:#fffbe0;border-radius:6px;padding:6px 2px}.nums b{display:block;font-size:17px}
+button{width:100%;padding:10px;margin:3px 0;border:0;border-radius:6px;cursor:pointer;background:#ffe600;color:#222;font-weight:bold}
+button.secondary{background:#e8f1ff}button.danger{background:#ffd7d7}button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:6px}.row button{flex:1}
+.small{font-size:10.5px;color:#666;margin-top:6px;line-height:1.4}
+#err{color:#b00020;font-size:12px;margin-top:4px;white-space:pre-wrap}
+</style></head><body>
+<h3>Coletor + Conversor Meli</h3>
+<label for="marketplace">Marketplace</label>
+<select id="marketplace"><option value="mercadolivre">Mercado Livre</option><option value="shopee">Shopee</option></select>
+<label for="manualLinks">Links adicionais (um por linha ou cole uma mensagem inteira)</label>
+<textarea id="manualLinks" rows="3" placeholder="Cole aqui links recebidos pelo WhatsApp..."></textarea>
+<div class="nums">
+  <div><b id="nTotal">0</b>coletados</div><div><b id="nOk">0</b>convertidos</div>
+  <div><b id="nPend">0</b>na fila</div><div><b id="nErr">0</b>com erro</div>
+</div>
+<div class="box"><b>Coleta:</b> <span id="collect">—</span></div>
+<div class="box"><b>Conversão:</b> <span id="convert">—</span></div>
+<label for="pageCount">Quantas páginas da lista de cupons? (1 a 100)</label>
+<input id="pageCount" type="number" min="1" max="100" value="3">
+<label><input id="backup" type="checkbox"> Também baixar um CSV por cupom (backup)</label>
+<button id="start">▶ Iniciar coleta + conversão</button>
+<div class="row"><button id="stop" class="danger">■ Parar e entregar</button><button id="resume" class="secondary">Continuar conversão</button></div>
+<button id="export" class="secondary">Exportar planilha agora</button>
+<button id="reset" class="secondary">Zerar tudo</button>
+<div id="err"></div>
+<p class="small">Para Mercado Livre, deixe a lista de cupons e o Linkbuilder abertos na mesma janela. Links adicionais entram na mesma fila. A Shopee já fica identificada na coleta; a conversão específica será conectada quando o conversor Shopee estiver disponível.</p>
+<script src="popup.js"></script></body></html>

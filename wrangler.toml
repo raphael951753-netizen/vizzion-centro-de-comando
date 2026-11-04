@@ -1,0 +1,9 @@
+name = "vizzion-mcp-worker"
+main = "mcp-worker.js"
+compatibility_date = "2026-11-03"
+
+[vars]
+MCP_BACKEND_URL = "http://localhost:8787"
+
+[[observability.enabled]]
+logs = true

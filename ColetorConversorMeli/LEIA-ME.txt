@@ -1,0 +1,36 @@
+COLETOR + CONVERSOR MULTI-MARKETPLACE 3.1.0  (uma extensão só)
+
+COMO USAR
+1. Abra chrome://extensions, ative o Modo do desenvolvedor e REMOVA/DESATIVE o Coletor Meli e o Conversor Meli antigos.
+2. "Carregar sem compactação" e escolha esta pasta.
+3. Na MESMA janela, deixe duas abas abertas:
+   - a lista de cupons do Mercado Livre
+   - o Linkbuilder: https://www.mercadolivre.com.br/afiliados/linkbuilder
+   Atualize (F5) as duas depois de instalar.
+4. Com a aba da lista ativa, abra a extensão, escolha o marketplace e clique em "Iniciar coleta + conversão". Também é possível colar links ou uma mensagem inteira do WhatsApp no campo de links adicionais.
+5. Pode deixar rodando. Quando a coleta termina e o último lote é convertido, a planilha final é baixada sozinha:
+   Coletor_mercadolivre_convertido_DATA_HORA.csv
+
+COMO FUNCIONA
+- Cada página de produtos coletada é entregue ao conversor logo depois de capturada (sem esperar o cupom acabar).
+- O conversor junta 30 links por lote e usa o Linkbuilder. Se a coleta terminou, converte o último lote mesmo incompleto.
+- URLs repetidas (mesmo produto em cupons diferentes) reaproveitam o link já gerado, sem converter de novo.
+- O catálogo persistente `meliCatalog` é atualizado em `chrome.storage.local`: uma nova coleta atualiza preço, título, imagem e disponibilidade pela URL, mas preserva o link afiliado já existente.
+- Colunas da planilha final: marketplace; cupom; id; nome; preco; preco_anterior; preco_com_desconto; categoria; imagem url; url; link_afiliado; status_conversao
+- link_afiliado só é preenchido quando deu certo. Mensagens de erro do Linkbuilder ficam em status_conversao, na linha do produto.
+- Lote que volte com menos linhas do que foi enviado: os produtos permanecem pendentes e são retestados com atraso progressivo, sem associar links por posição.
+- Erros confirmados de não elegibilidade, URL inválida ou produto indisponível são marcados como `Erro real`. Falhas de carregamento permanecem pendentes.
+- Shopee já pode ser selecionado e fica registrado no fluxo/CSV; a conversão Shopee ainda precisa de um adaptador próprio.
+
+BOTÕES
+- Parar e entregar: interrompe a coleta, converte o que já foi coletado e baixa a planilha.
+- Continuar conversão: retoma depois de CAPTCHA, limite ou aba fechada.
+- Exportar planilha agora: baixa o que existe no momento (parcial).
+- Zerar tudo: apaga progresso e planilha salvos.
+- "Também baixar CSV por cupom": mantém os CSVs por cupom do coletor antigo como backup.
+- O botão "Zerar tudo" remove somente o estado da execução atual; o histórico `meliCatalog` permanece para permitir atualização incremental.
+
+OBSERVAÇÕES
+- Se aparecer CAPTCHA ou limite no Linkbuilder, a conversão pausa e mostra o motivo; resolva na aba dele e clique em Continuar. A coleta segue em paralelo.
+- Foi testado só com simulação do Linkbuilder, não no site real. Faça o primeiro teste com 1 página de cupons e confira se os links ficaram nas linhas certas.
+- O Chrome pode deixar abas em segundo plano mais lentas. Se o Linkbuilder não responder quando não está visível, coloque-o em outra janela, lado a lado com a primeira, sem minimizar.

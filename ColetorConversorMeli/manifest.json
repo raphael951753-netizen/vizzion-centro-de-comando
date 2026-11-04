@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Coletor + Conversor Meli",
+  "version": "3.0.0",
+  "description": "Coleta produtos dos cupons do Mercado Livre e converte em links de afiliado automaticamente, entregando uma única planilha.",
+  "permissions": ["storage", "unlimitedStorage", "activeTab", "downloads", "tabs", "offscreen", "scripting"],
+  "host_permissions": [
+    "https://*.mercadolivre.com.br/*",
+    "https://*.mercadolibre.com/*"
+  ],
+  "action": {
+    "default_title": "Coletor + Conversor Meli",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.mercadolivre.com.br/*", "https://*.mercadolibre.com/*"],
+      "exclude_matches": ["https://www.mercadolivre.com.br/afiliados/linkbuilder*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.mercadolivre.com.br/afiliados/linkbuilder*"],
+      "js": ["converter.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {"service_worker": "background.js"}
+}

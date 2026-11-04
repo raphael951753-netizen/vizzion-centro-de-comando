@@ -1,0 +1,18 @@
+{
+  "name": "vizzion-mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Servidor MCP inicial da Vizzion para contexto e catalogo local.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.2",
+    "express": "^4.21.2",
+    "zod": "^3.25.76"
+  }
+}
